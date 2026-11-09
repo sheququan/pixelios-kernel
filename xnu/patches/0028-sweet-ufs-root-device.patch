@@ -97,7 +97,7 @@ new file mode 100644
 +
 +#define UFS_BLOCK       4096u
 +#define BOUNCE_SIZE     (1u << 20)
-+#define PRDT_CHUNK      (4u << 10)              /* gs201: one PRDT entry above 8 KiB times out (bootAW 2026-11-08: 4/8 KiB ok, 16/32 KiB OCS error), so 4 KiB keeps a 2x margin. UCD still fits: 512+512+256*16 = 5120 < DMA_BOUNCE-DMA_UCD = 12288 */
++#define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
 +#define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK)
 +#define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
 +

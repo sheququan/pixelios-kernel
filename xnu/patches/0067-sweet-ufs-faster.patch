@@ -8,15 +8,15 @@
  #include <machine/machine_routines.h>
  #include <arm/caches_internal.h>
  #include <vm/pmap.h>
-@@ -42,6 +43,8 @@
- extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
- /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+@@ -43,6 +44,8 @@
  extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +/* osfmk/arm/cpu_data.h, not exported to the BSD layer */
 +extern int get_preemption_level(void);
  extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
  extern void thread_deallocate(thread_t);
  extern int hz;
+ static void sweet_log_start(void);
+ 
 @@ -70,6 +73,8 @@
  #define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
  #define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK)
