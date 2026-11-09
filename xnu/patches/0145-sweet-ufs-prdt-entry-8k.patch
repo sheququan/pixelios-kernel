@@ -1,0 +1,97 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -78,6 +78,12 @@
+ #define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
+ #define PRDT_CHUNK_GS   4096u                   /* gs101: each PRD entry moves at most 4 KiB */
+ #define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK_GS)
++#define PRDT_ENTRY_MAX  (8u << 10)              /* gs201: one PRD entry above 8 KiB is aborted
++                                                 * with an OCS error (shim DMA test 2026-11-08:
++                                                 * 4/8 KiB ok, 16/32 KiB OCS). 1 MiB / 8 KiB
++                                                 * = 128 entries, which fits PRDT_MAX (256). */
++_Static_assert(BOUNCE_SIZE / PRDT_ENTRY_MAX <= PRDT_MAX,
++    "PRDT_MAX is too small for PRDT_ENTRY_MAX");
+ #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
+ #define CMD_SPIN_NS     (50ull * NSEC_PER_USEC)
+ #define CMD_SLEEP_NS    (200ull * NSEC_PER_USEC)
+@@ -182,11 +188,20 @@
+ 	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
+ 	/* gs101 (UFSHCD_QUIRK_PRDT_BYTE_GRAN): response/PRDT offsets and lengths in bytes. */
+ 	const uint32_t gran = su.gs101 ? 1 : 4;
+-	const uint32_t prdt_chunk = su.gs101 ? PRDT_CHUNK_GS : PRDT_CHUNK;
++	/* gs201: split the 1 MiB bounce buffer into 8 KiB PRD entries instead of one
++	 * 256 KiB entry, which the controller aborts with an OCS error. The native
++	 * DWORD granularity, the response/PRDT offsets and the single READ(10) /
++	 * WRITE(10) per request all stay unchanged; only the per-entry length shrinks. */
++	const uint32_t prdt_chunk = su.gs101 ? PRDT_CHUNK_GS : PRDT_ENTRY_MAX;
+ 	utrd->resp = (512u / gran) << 16 | (512u / gran);
+ 	if (len) {
+ 		uint32_t n = 0;
+ 		for (uint32_t done = 0; done < len; done += prdt_chunk, n++) {
++			if (n >= PRDT_MAX) {
++				printf("SWEET UFS: PRDT overflow len 0x%x chunk %u max %u\n",
++				    len, prdt_chunk, (unsigned)PRDT_MAX);
++				return EINVAL;
++			}
+ 			uint32_t chunk = MIN(prdt_chunk, len - done);
+ 			ucd->prdt[n].addr_lo = (uint32_t)(bounce_pa + done);
+ 			ucd->prdt[n].addr_hi = (uint32_t)((bounce_pa + done) >> 32);
+@@ -200,8 +215,10 @@
+ 		dma_clean(DMA_UCD, 16 + cdb_len);
+ 		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
+ 		if (len) {
++			/* gs201 stores the entry count; gs101 stores 16 * count (bytes). */
++			uint32_t prdt_n = (utrd->prdt & 0xffff) / (su.gs101 ? 16 : 1);
+ 			dma_clean(DMA_UCD + offsetof(struct ucd, prdt),
+-			    (utrd->prdt & 0xffff) * sizeof(ucd->prdt[0]));
++			    prdt_n * sizeof(ucd->prdt[0]));
+ 		}
+ 	} else {
+ 		dma_sync(DMA_UTRL + slot * sizeof(*utrd), sizeof(*utrd));
+@@ -272,9 +289,15 @@
+ 	if (su.gs101 && ocs == 7 && (ucd->resp[6] || ucd->resp[7])) {
+ 		ocs = 0;        /* BROKEN_OCS_FATAL_ERROR: OCS 7 with a response present is a normal completion */
+ 	}
+-	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+-		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+-		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++	/* Response UPIU: [4] response, [5] status, [8..11] residual (big-endian).
++	 * 0xffffffff means the target does not report a residual. */
++	uint32_t residual = ((uint32_t)ucd->resp[8] << 24) | ((uint32_t)ucd->resp[9] << 16) |
++	    ((uint32_t)ucd->resp[10] << 8) | (uint32_t)ucd->resp[11];
++	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[5] || ucd->resp[6] ||
++	    ucd->resp[7] || (residual && residual != 0xffffffffu)) {
++		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x resp 0x%x "
++		    "status 0x%x residual 0x%x\n",
++		    cdb[0], ocs, ucd->resp[0], ucd->resp[4], ucd->resp[5], residual);
+ 		return EIO;
+ 	}
+ 	return 0;
+@@ -285,6 +308,8 @@
+ ufs_read_blocks(uint64_t lba, uint32_t count)
+ {
+ 	if (lba > UINT32_MAX || count > BOUNCE_SIZE / UFS_BLOCK) {
++		printf("SWEET UFS: E2 read lba 0x%llx blocks %u limit %u\n",
++		    (unsigned long long)lba, count, (unsigned)(BOUNCE_SIZE / UFS_BLOCK));
+ 		return EINVAL;
+ 	}
+ 	uint8_t cdb[10] = {
+@@ -444,6 +469,8 @@
+ 		goto done;
+ 	}
+ 	if (off > part_bytes || count > part_bytes - off) {
++		printf("SWEET UFS: E1 range blkno %llu count %u sec %u off 0x%llx part 0x%llx\n",
++		    (unsigned long long)buf_blkno(bp), count, su.secsize, off, part_bytes);
+ 		error = EINVAL;
+ 		goto done;
+ 	}
+@@ -489,6 +516,10 @@
+ 
+ done:
+ 	if (error) {
++		printf("SWEET UFS: strategy err %d rd %d blkno %llu count %u sec %u "
++		    "off 0x%llx part 0x%llx\n",
++		    error, rd ? 1 : 0, (unsigned long long)buf_blkno(bp), count,
++		    su.secsize, off, part_bytes);
+ 		buf_seterror(bp, error);
+ 	}
+ 	buf_biodone(bp);
