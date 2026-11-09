@@ -1,0 +1,4 @@
+# Patches are applied with `git apply`, which treats CR as part of the hunk
+# context: a CRLF patch never matches LF sources. Keep them byte-stable.
+xnu/patches/*.patch text eol=lf
+xnu/patches/*.sh    text eol=lf
