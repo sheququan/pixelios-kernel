@@ -1,0 +1,148 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -84,6 +84,16 @@
+                                                  * = 128 entries, which fits PRDT_MAX (256). */
+ _Static_assert(BOUNCE_SIZE / PRDT_ENTRY_MAX <= PRDT_MAX,
+     "PRDT_MAX is too small for PRDT_ENTRY_MAX");
++/* The controller also gives up on a command that carries too many PRD entries:
++ * the 541 KiB /sbin/launchd read became one READ(10) with 68 x 8 KiB entries
++ * and never completed (0x28 timed out, bootBT), while every mount-time read
++ * with one or two entries finished. Cap one command at 8 entries = 64 KiB and
++ * loop instead. The bounce buffer, the strategy request size and every check
++ * in sweet_ufs_strategy() stay exactly as they are. */
++#define PRDT_CMD_ENTRIES  8u
++#define PRDT_CMD_BYTES    (PRDT_CMD_ENTRIES * PRDT_ENTRY_MAX)   /* 64 KiB */
++#define PRDT_CMD_BLOCKS   (PRDT_CMD_BYTES / UFS_BLOCK)          /* 16 blocks */
++_Static_assert(PRDT_CMD_BLOCKS > 0, "PRDT_CMD_BLOCKS must be non-zero");
+ #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
+ #define CMD_SPIN_NS     (50ull * NSEC_PER_USEC)
+ #define CMD_SLEEP_NS    (200ull * NSEC_PER_USEC)
+@@ -158,16 +168,19 @@
+  * (to the device when write is set). Returns 0 or an errno.
+  */
+ static int
+-ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
++ufs_scsi_at(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write,
++    uint32_t bounce_off)
+ {
+ 	/* gs101: HCI_UTRL_NEXUS_TYPE is 0xFFFFFFFE, slot 0 is device management only: SCSI uses slot 1 */
+ 	const unsigned slot = su.gs101 ? 1 : 0;
+ 	const uint32_t slot_bit = 1u << slot;
+ 	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL) + slot;
+ 	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
+-	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
++	uint64_t ucd_pa = su.dma_pa + DMA_UCD;
++	uint64_t bounce_pa = su.dma_pa + DMA_BOUNCE + bounce_off;
+ 
+ 	assert(len <= BOUNCE_SIZE);
++	assert(bounce_off + len <= BOUNCE_SIZE);
+ 	bzero(utrd, sizeof(*utrd));
+ 	bzero(ucd, sizeof(*ucd));
+ 
+@@ -226,9 +239,9 @@
+ 	}
+ 	if (len) {
+ 		if (su.cache && write) {
+-			dma_clean(DMA_BOUNCE, len);
++			dma_clean(DMA_BOUNCE + bounce_off, len);
+ 		} else {
+-			dma_sync(DMA_BOUNCE, len);
++			dma_sync(DMA_BOUNCE + bounce_off, len);
+ 		}
+ 	}
+ 	__builtin_arm_dsb(0xf);
+@@ -303,7 +316,20 @@
+ 	return 0;
+ }
+ 
+-/* READ(10) of count device blocks at lba into the bounce buffer. */
++/* One command that starts at the base of the bounce buffer: what every caller
++ * except the block loops below wants. */
++static int
++ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
++{
++	return ufs_scsi_at(cdb, cdb_len, len, write, 0);
++}
++
++/*
++ * READ(10) of count device blocks at lba into the bounce buffer, split into
++ * commands of at most PRDT_CMD_BLOCKS (64 KiB / 8 PRD entries). The data still
++ * lands contiguously in the bounce buffer, so every caller and the strategy
++ * copy-out are unaffected -- only the number of READ(10)s changes.
++ */
+ static int
+ ufs_read_blocks(uint64_t lba, uint32_t count)
+ {
+@@ -312,12 +338,30 @@
+ 		    (unsigned long long)lba, count, (unsigned)(BOUNCE_SIZE / UFS_BLOCK));
+ 		return EINVAL;
+ 	}
+-	uint8_t cdb[10] = {
+-		0x28, 0,
+-		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+-		0, (uint8_t)(count >> 8), (uint8_t)count, 0
+-	};
+-	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
++
++	uint32_t done = 0;
++	while (done < count) {
++		uint32_t n = count - done;
++
++		if (n > PRDT_CMD_BLOCKS) {
++			n = PRDT_CMD_BLOCKS;
++		}
++		uint64_t blk = lba + done;
++		uint8_t cdb[10] = {
++			0x28, 0,
++			(uint8_t)(blk >> 24), (uint8_t)(blk >> 16),
++			(uint8_t)(blk >> 8), (uint8_t)blk,
++			0, (uint8_t)(n >> 8), (uint8_t)n, 0
++		};
++		int error = ufs_scsi_at(cdb, sizeof(cdb), n * UFS_BLOCK, false,
++		    done * UFS_BLOCK);
++
++		if (error) {
++			return error;
++		}
++		done += n;
++	}
++	return 0;
+ }
+ 
+ /*
+@@ -333,12 +377,29 @@
+ 		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
+ 		return EPERM;
+ 	}
+-	uint8_t cdb[10] = {
+-		0x2a, 0,
+-		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+-		0, (uint8_t)(count >> 8), (uint8_t)count, 0
+-	};
+-	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);
++	uint32_t done = 0;
++	while (done < count) {
++		uint32_t n = count - done;
++
++		if (n > PRDT_CMD_BLOCKS) {
++			n = PRDT_CMD_BLOCKS;
++		}
++		uint64_t blk = lba + done;
++		uint8_t cdb[10] = {
++			0x2a, 0,
++			(uint8_t)(blk >> 24), (uint8_t)(blk >> 16),
++			(uint8_t)(blk >> 8), (uint8_t)blk,
++			0, (uint8_t)(n >> 8), (uint8_t)n, 0
++		};
++		int error = ufs_scsi_at(cdb, sizeof(cdb), n * UFS_BLOCK, true,
++		    done * UFS_BLOCK);
++
++		if (error) {
++			return error;
++		}
++		done += n;
++	}
++	return 0;
+ }
+ 
+ static int
