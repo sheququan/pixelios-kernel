@@ -1,0 +1,286 @@
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -348,6 +348,17 @@
+ }
+ 
+ /*
++/*
++ * SWEET (R14): every genuine Apple signature from the iPhone rootfs is
++ * rejected here with EBADEXEC, and the only visible symptom is "unable to
++ * create a validated cs_blob object: 85". There are ~36 places that can
++ * produce that code; print the line so the next boot says which one.
++ */
++#define SWEET_BAD() do { \
++	printf("SWEET CS: rejected at ubc_subr.c:%d\n", __LINE__); \
++	return EBADEXEC; \
++} while (0)
++
+  * cs_validate_codedirectory
+  *
+  * Validate that pointers inside the code directory to make sure that
+@@ -366,41 +377,41 @@
+ 	struct cs_hash const *hashtype;
+ 
+ 	if (length < sizeof(*cd)) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 	if (ntohl(cd->magic) != CSMAGIC_CODEDIRECTORY) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT)) {
+ 		printf("disallowing unsupported code signature page shift: %u\n", cd->pageSize);
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 	hashtype = cs_find_md(cd->hashType);
+ 	if (hashtype == NULL) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	if (cd->hashSize != hashtype->cs_size) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	if (length < ntohl(cd->hashOffset)) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	/* check that nSpecialSlots fits in the buffer in front of hashOffset */
+ 	if (ntohl(cd->hashOffset) / hashtype->cs_size < ntohl(cd->nSpecialSlots)) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	/* check that codeslots fits in the buffer */
+ 	if ((length - ntohl(cd->hashOffset)) / hashtype->cs_size < ntohl(cd->nCodeSlots)) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	if (ntohl(cd->version) >= CS_SUPPORTSSCATTER && cd->scatterOffset) {
+ 		if (length < ntohl(cd->scatterOffset)) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ 
+ 		const SC_Scatter *scatter = (const SC_Scatter *)
+@@ -415,14 +426,14 @@
+ 		while (1) {
+ 			/* check that the end of each scatter buffer in within the length */
+ 			if (((const uint8_t *)scatter) + sizeof(scatter[0]) > (const uint8_t *)cd + length) {
+-				return EBADEXEC;
++		SWEET_BAD();
+ 			}
+ 			uint32_t scount = ntohl(scatter->count);
+ 			if (scount == 0) {
+ 				break;
+ 			}
+ 			if (nPages + scount < nPages) {
+-				return EBADEXEC;
++		SWEET_BAD();
+ 			}
+ 			nPages += scount;
+ 			scatter++;
+@@ -432,32 +443,32 @@
+ 		}
+ #if 0 /* rdar://12579439 */
+ 		if (nPages != ntohl(cd->nCodeSlots)) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ #endif
+ 	}
+ 
+ 	if (length < ntohl(cd->identOffset)) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	/* identifier is NUL terminated string */
+ 	if (cd->identOffset) {
+ 		const uint8_t *ptr = (const uint8_t *)cd + ntohl(cd->identOffset);
+ 		if (memchr(ptr, 0, length - ntohl(cd->identOffset)) == NULL) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ 	}
+ 
+ 	/* team identifier is NULL terminated string */
+ 	if (ntohl(cd->version) >= CS_SUPPORTSTEAMID && ntohl(cd->teamOffset)) {
+ 		if (length < ntohl(cd->teamOffset)) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ 
+ 		const uint8_t *ptr = (const uint8_t *)cd + ntohl(cd->teamOffset);
+ 		if (memchr(ptr, 0, length - ntohl(cd->teamOffset)) == NULL) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ 	}
+ 
+@@ -467,7 +478,7 @@
+ 		const uintptr_t ptr_end = ptr + ntohl(cd->linkageSize);
+ 
+ 		if (ptr_end < ptr || ptr < (uintptr_t)cd || ptr_end > (uintptr_t)cd + length) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ 	}
+ 
+@@ -483,7 +494,7 @@
+ cs_validate_blob(const CS_GenericBlob *blob, size_t length)
+ {
+ 	if (length < sizeof(CS_GenericBlob) || length < ntohl(blob->length)) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 	return 0;
+ }
+@@ -543,7 +554,7 @@
+ #endif
+ 
+ 		if (length < sizeof(CS_SuperBlob)) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ 
+ 		sb = (const CS_SuperBlob *)blob;
+@@ -551,7 +562,7 @@
+ 
+ 		/* check that the array of BlobIndex fits in the rest of the data */
+ 		if ((length - sizeof(CS_SuperBlob)) / sizeof(CS_BlobIndex) < count) {
+-			return EBADEXEC;
++		SWEET_BAD();
+ 		}
+ 
+ 		/* now check each BlobIndex */
+@@ -560,7 +571,7 @@
+ 			uint32_t type = ntohl(blobIndex->type);
+ 			uint32_t offset = ntohl(blobIndex->offset);
+ 			if (length < offset) {
+-				return EBADEXEC;
++		SWEET_BAD();
+ 			}
+ 
+ 			const CS_GenericBlob *subBlob =
+@@ -594,60 +605,60 @@
+ 				} else if (best_cd != NULL && rank == best_rank) {
+ 					/* repeat of a hash type (1:1 mapped to ranks), illegal and suspicious */
+ 					printf("multiple hash=%d CodeDirectories in signature; rejecting\n", best_cd->hashType);
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ #if XNU_PLATFORM_WatchOS
+ 				if (candidate->hashType == CS_HASHTYPE_SHA1) {
+ 					if (sha1_cd != NULL) {
+ 						printf("multiple sha1 CodeDirectories in signature; rejecting\n");
+-						return EBADEXEC;
++		SWEET_BAD();
+ 					}
+ 					sha1_cd = candidate;
+ 				}
+ #endif
+ 			} else if (type == CSSLOT_ENTITLEMENTS) {
+ 				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_ENTITLEMENTS) {
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				if (*rentitlements != NULL) {
+ 					printf("multiple entitlements blobs\n");
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				*rentitlements = subBlob;
+ 			} else if (type == CSSLOT_DER_ENTITLEMENTS) {
+ 				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_DER_ENTITLEMENTS) {
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				if (*rder_entitlements != NULL) {
+ 					printf("multiple der entitlements blobs\n");
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				*rder_entitlements = subBlob;
+ 			} else if (type == CSSLOT_LAUNCH_CONSTRAINT_SELF) {
+ 				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT) {
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				if (self_constraint != NULL) {
+ 					printf("multiple self constraint blobs\n");
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				self_constraint = subBlob;
+ 			} else if (type == CSSLOT_LAUNCH_CONSTRAINT_PARENT) {
+ 				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT) {
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				if (parent_constraint != NULL) {
+ 					printf("multiple parent constraint blobs\n");
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				parent_constraint = subBlob;
+ 			} else if (type == CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE) {
+ 				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT) {
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				if (responsible_proc_constraint != NULL) {
+ 					printf("multiple responsible process constraint blobs\n");
+-					return EBADEXEC;
++		SWEET_BAD();
+ 				}
+ 				responsible_proc_constraint = subBlob;
+ 			}
+@@ -677,7 +688,7 @@
+ 				printf("mismatched flags between hash %d (flags: %#x) and sha1 (flags: %#x) cd.\n",
+ 				    (int)(*rcd)->hashType, (*rcd)->flags, sha1_cd->flags);
+ 				*rcd = NULL;
+-				return EBADEXEC;
++		SWEET_BAD();
+ 			}
+ 
+ 			*rcd = sha1_cd;
+@@ -689,11 +700,11 @@
+ 		}
+ 		*rcd = (const CS_CodeDirectory *)blob;
+ 	} else {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	if (*rcd == NULL) {
+-		return EBADEXEC;
++		SWEET_BAD();
+ 	}
+ 
+ 	return 0;
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -3499,6 +3499,16 @@
+ 	    kauth_cred_get(),
+ 	    &resid,
+ 	    current_proc());
++	/*
++	 * SWEET (R14): dyld's signature blob came back as four zero words even
++	 * though vn_rdwr is expected to report a full read here, i.e. the pager
++	 * handed out zero pages for that range of a file whose header read fine.
++	 * Print the request, the result and the first word so the next boot tells
++	 * a failed read from a successful read of zero bytes.
++	 */
++	printf("SWEET CS: %s sig off %lld size %u err %d resid %d first %08x\n",
++	    vp->v_name, (long long)(macho_offset + lcp->dataoff), lcp->datasize,
++	    error, resid, addr ? *(const uint32_t *)(uintptr_t)addr : 0);
+ 	if (error || resid != 0) {
+ 		ret = LOAD_IOERROR;
+ 		goto out;
