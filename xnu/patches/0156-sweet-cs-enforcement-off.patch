@@ -1,0 +1,33 @@
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -166,10 +166,26 @@
+ 	int disable_cs_enforcement = 0;
+ 	PE_parse_boot_argn("cs_enforcement_disable", &disable_cs_enforcement,
+ 	    sizeof(disable_cs_enforcement));
+-	if (disable_cs_enforcement && PE_i_can_has_debugger(NULL) != 0) {
+-		cs_system_enforcement_enable = 0;
+-		cs_process_enforcement_enable = 0;
+-	} else {
++	/*
++	 * SWEET (R12): this kernel runs on hardware with no Image4 and no static
++	 * trust cache, so no binary from the iPhone rootfs can ever present a
++	 * signature that validates:
++	 *
++	 *   unable to create a validated cs_blob object: 85
++	 *   proc: 1 load code signature error 4 for file "launchd"
++	 *   panic: unexpected SIGKILL of launchd (CS_KILLED)
++	 *
++	 * The original gate below also required PE_i_can_has_debugger(), which is
++	 * false here, so the boot-arg alone never took effect. Disable process
++	 * enforcement unconditionally: exec then ignores the signature error, the
++	 * process is not marked CS_KILL, and an unvalidated page only marks the
++	 * process tainted instead of killing it.
++	 */
++	cs_system_enforcement_enable = 0;
++	cs_process_enforcement_enable = 0;
++	printf("SWEET CS: process enforcement off (cs_enforcement_disable=%d, "
++	    "no trust cache on this platform)\n", disable_cs_enforcement);
++	{
+ 		int panic = 0;
+ 		PE_parse_boot_argn("cs_enforcement_panic", &panic, sizeof(panic));
+ 		cs_enforcement_panic = (panic != 0);

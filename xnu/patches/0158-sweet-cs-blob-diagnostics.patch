@@ -1,0 +1,37 @@
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -3990,6 +3990,24 @@
+ 			printf("CODESIGNING: csblob invalid: %d\n", error);
+ 		}
+ 		/*
++		 * SWEET: on this device every rootfs signature fails validation, and
++		 * the two possible reasons could not be further apart: either the
++		 * blob really is a signature this XNU refuses, or the bytes are not
++		 * what is on disk (a short read through the UFS bounce buffer). Print
++		 * the header words so the next boot says which: a real SuperBlob
++		 * starts with 0xfade0cc0 / its length / its blob count.
++		 */
++		{
++			const uint32_t *hdr = (const uint32_t *)blob->csb_mem_kaddr;
++
++			printf("SWEET CS: blob %p len %lu err %d words %08x %08x "
++			    "%08x %08x\n", blob->csb_mem_kaddr, (unsigned long)size,
++			    error, length >= 4 ? ntohl(hdr[0]) : 0,
++			    length >= 8 ? ntohl(hdr[1]) : 0,
++			    length >= 12 ? ntohl(hdr[2]) : 0,
++			    length >= 16 ? ntohl(hdr[3]) : 0);
++		}
++		/*
+ 		 * The vnode checker can't make the rest of this function
+ 		 * succeed if csblob validation failed, so bail */
+ 		goto out;
+@@ -4626,7 +4644,8 @@
+ 	 */
+ 	error = cs_blob_init_validated(addr, size, &tmp_blob, &cd);
+ 	if (error != 0) {
+-		printf("unable to create a validated cs_blob object: %d\n", error);
++		printf("unable to create a validated cs_blob object: %d for \"%s\" "
++		    "size %lu\n", error, vp->v_name, (unsigned long)size);
+ 		return error;
+ 	}
+ 

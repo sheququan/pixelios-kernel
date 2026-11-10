@@ -1,0 +1,26 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7438,6 +7438,23 @@
+ 	os_reason_t signature_failure_reason = OS_REASON_NULL;
+ 
+ 	/*
++	 * SWEET (R12): this device has no Image4 and therefore no static trust
++	 * cache, so no binary from the iPhone rootfs can ever present a signature
++	 * that validates. The loader already tolerates that when process
++	 * enforcement is off (kern_cs.c forces it off), but the policy checks
++	 * below still kill pid 1:
++	 *
++	 *   panic: unexpected SIGKILL of launchd (CS_KILLED)
++	 *          ... exit reason namespace 9 subcode 0x8
++	 *
++	 * None of them can succeed without a trust cache, so run everything
++	 * unsealed instead of dying on a signature that cannot exist here.
++	 */
++	if (!cs_process_global_enforcement()) {
++		return 0;
++	}
++
++	/*
+ 	 * Override inherited code signing flags with the
+ 	 * ones for the process that is being successfully
+ 	 * loaded
