@@ -1,0 +1,22 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -89,9 +89,16 @@
+  * several <=64 KiB commands is unnecessary and gives the controller extra
+  * chances to leave a pending UNIT ATTENTION. Keep the loop in the block
+  * helpers but let one iteration cover the whole request. */
+-#define PRDT_CMD_ENTRIES  (BOUNCE_SIZE / PRDT_ENTRY_MAX)        /* 128 */
+-#define PRDT_CMD_BYTES    BOUNCE_SIZE                           /* 1 MiB */
+-#define PRDT_CMD_BLOCKS   (PRDT_CMD_BYTES / UFS_BLOCK)          /* 256 blocks */
++/* R8: one 8 KiB PRD entry per command. bootCI showed the host dying right
++ * after a 64-entry 512 KiB READ(10) - the last command that completed was
++ * #13 (len 524288, nprd 64) and from #14 on the doorbell cleared, OCS stayed
++ * at 0x0F, the response UPIU was empty and UTRLRSR read back 0, i.e. the
++ * host had stopped its own request list and would not take ours again. Every
++ * command that ever worked carried exactly one entry, so shrink the command
++ * to one entry and see whether the boot gets past /sbin/launchd. */
++#define PRDT_CMD_ENTRIES  1u                                    /* 1 entry */
++#define PRDT_CMD_BYTES    (PRDT_CMD_ENTRIES * PRDT_ENTRY_MAX)   /* 8 KiB */
++#define PRDT_CMD_BLOCKS   (PRDT_CMD_BYTES / UFS_BLOCK)          /* 2 blocks */
+ _Static_assert(PRDT_CMD_BLOCKS > 0, "PRDT_CMD_BLOCKS must be non-zero");
+ _Static_assert(PRDT_CMD_ENTRIES <= PRDT_MAX, "PRDT_CMD_ENTRIES exceeds PRDT_MAX");
+ #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
