@@ -1,0 +1,42 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7737,6 +7737,14 @@
+ 	    VM_PROT_READ | VM_PROT_EXECUTE,
+ 	    FALSE, VM_KERN_MEMORY_NONE,
+ 	    THREAD_UNINT, NULL, 0);
++	/*
++	 * SWEET (R13): the entry point and whether its page could be faulted in is
++	 * the difference between "the binary ran and hit a bad instruction" and
++	 * "the first instruction was never mapped". launchd dies with SIGILL right
++	 * after this, so say both out loud instead of behind DEBUG4K.
++	 */
++	printf("SWEET EXEC: %s entry %#llx prefault %d\n",
++	    imgp->ip_vp->v_name, (unsigned long long)load_result->entry_point, kr);
+ 	if (kr != KERN_SUCCESS) {
+ 		DEBUG4K_ERROR("map %p va 0x%llx -> 0x%x\n", current_map(), (uint64_t)vm_map_trunc_page(load_result->entry_point, vm_map_page_mask(current_map())), kr);
+ 	}
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -629,6 +629,22 @@
+ 	}
+ #endif
+ 	bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
++
++	/*
++	 * SWEET (R13): with code signing out of the way, launchd now runs and dies
++	 * with SIGILL a few instructions in:
++	 *   launchd[1] exited -- exit reason namespace 2 subcode 0x4
++	 * Nothing in the kernel reports where, and the screen is the only console,
++	 * so print every user synchronous exception with its PC. That tells a bad
++	 * instruction in a correctly mapped page (EC 0, pc inside __TEXT) from a
++	 * jump into unmapped or zeroed memory (IABORT/DABORT or pc outside).
++	 */
++	if (is_user) {
++		kprintf("SWEET EXC: thread %d pc %#llx esr %#x ec %u far %#llx\n",
++		    thread_tid(current_thread()),
++		    (unsigned long long)get_saved_state_pc(state), esr,
++		    (unsigned)class, (unsigned long long)far);
++	}
+ 
+ 	/*
+ 	 * Use KERNEL_DEBUG_CONSTANT_IST here to avoid producing tracepoints
