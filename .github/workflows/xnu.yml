@@ -46,7 +46,7 @@ jobs:
   kernel:
     # macos-14 ships Xcode 15, whose iig matches the xnu-8796 IORPC ABI (Xcode 16's does not).
     # macos-13 was retired by GitHub in 2025 and never gets scheduled.
-    runs-on: macos-13
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
