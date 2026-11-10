@@ -1,0 +1,56 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -263,7 +263,10 @@
+ 		if (now > deadline) {
+ 			/* gs101 has an inverted UTRLCLR (write the slot mask); standard hosts want ~mask */
+ 			ufs_wr(REG_UTRLCLR, su.gs101 ? slot_bit : ~slot_bit);
+-			printf("SWEET UFS: command 0x%02x timed out\n", cdb[0]);
++			printf("SWEET UFS: command 0x%02x timed out slot %u len %u off %u "
++			    "dbr 0x%x is 0x%x hcs 0x%x ocs 0x%x\n",
++			    cdb[0], slot, len, bounce_off, ufs_rd(REG_UTRLDBR),
++			    ufs_rd(REG_IS), ufs_rd(REG_HCS), utrd->dw2 & 0xff);
+ 			return ETIMEDOUT;
+ 		}
+ 		if (sleepable && now >= spin_until) {
+@@ -280,13 +283,19 @@
+ 	__builtin_arm_dsb(0xf);
+ 	ufs_wr(REG_IS, ufs_rd(REG_IS));         /* acknowledge completion status */
+ 
+-	/* gs101: the UTRD write-back can land a little after the doorbell clears */
+-	for (int w = 0; su.gs101 && w < 100; w++) {
++	/* The doorbell can clear as soon as the host fetches the descriptor,
++	 * well before the controller writes OCS back. The shim measured ~115 ms
++	 * for a 64 KiB transfer (bootBR / F36) while its own wait was only 10 ms.
++	 * Wait up to 1 s on every SoC, not just gs101 with 100 x delay(1). */
++	uint64_t ocs_deadline;
++	nanoseconds_to_absolutetime(1ull * NSEC_PER_SEC, &ocs_deadline);
++	ocs_deadline += mach_absolute_time();
++	for (;;) {
+ 		dma_sync(DMA_UTRL + slot * sizeof(*utrd), sizeof(*utrd));
+-		if ((utrd->dw2 & 0xff) != 0x0f) {
++		if ((utrd->dw2 & 0xff) != 0x0f || mach_absolute_time() > ocs_deadline) {
+ 			break;
+ 		}
+-		delay(1);
++		delay(10);
+ 	}
+ 	dma_sync(DMA_UTRL + slot * sizeof(*utrd), sizeof(*utrd));
+ 	if (su.cache) {
+@@ -295,7 +304,7 @@
+ 		dma_sync(DMA_UCD, sizeof(*ucd));
+ 	}
+ 	if (len && !(su.cache && write)) {
+-		dma_sync(DMA_BOUNCE, len);
++		dma_sync(DMA_BOUNCE + bounce_off, len);
+ 	}
+ 
+ 	uint32_t ocs = utrd->dw2 & 0xff;
+@@ -307,7 +316,7 @@
+ 	uint32_t residual = ((uint32_t)ucd->resp[8] << 24) | ((uint32_t)ucd->resp[9] << 16) |
+ 	    ((uint32_t)ucd->resp[10] << 8) | (uint32_t)ucd->resp[11];
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[5] || ucd->resp[6] ||
+-	    ucd->resp[7] || (residual && residual != 0xffffffffu)) {
++	    ucd->resp[7] || (len && residual && residual != 0xffffffffu)) {
+ 		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x resp 0x%x "
+ 		    "status 0x%x residual 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[4], ucd->resp[5], residual);
