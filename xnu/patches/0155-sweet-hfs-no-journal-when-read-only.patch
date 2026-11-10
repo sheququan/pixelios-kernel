@@ -1,0 +1,22 @@
+--- a/bsd/sweet_hfs/core/hfs_vfsutils.c
++++ b/bsd/sweet_hfs/core/hfs_vfsutils.c
+@@ -2687,6 +2687,19 @@
+ 	devvp = hfsmp->hfs_devvp;
+ 	vcb = HFSTOVCB(hfsmp);
+ 	
++	/*
++	 * SWEET: the root volume is mounted read-only (MNT_RDONLY | MNT_ROOTFS)
++	 * on a device that refuses writes, so neither replaying the journal nor
++	 * creating one can work: the write fails with EROFS and the mount then
++	 * fails with EINVAL. A read-only mount needs no journal, so take the same
++	 * way out as the "can't read journal info block" path below and let the
++	 * volume mount without one.
++	 */
++	if (hfsmp->hfs_flags & HFS_READ_ONLY) {
++		vcb->vcbAtrb &= ~kHFSVolumeJournaledMask;
++		return 0;
++	}
++
+ 	if (args != NULL && (args->flags & HFSFSMNT_EXTENDED_ARGS)) {
+ 		if (args->journal_disable) {
+ 			return 0;
