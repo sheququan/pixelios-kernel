@@ -1,0 +1,71 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -151,6 +151,17 @@
+  * volume and then dropped the very next 4 KiB read, and the second boot got as
+  * far as "BSD root: ufsroot0" before the same thing happened, so every failure
+  * print carries the sequence number and the last command that completed. */
++/* R10: one build, several behaviours, picked by boot-arg ufsxnu=<bits>.
++ * Every candidate fix for "the host refuses every second command" is behind a
++ * bit so a single CI build can test them all by rebooting:
++ *   bit0 (1) acknowledge the completion (clear IS) after OCS, like the shim,
++ *            instead of right after the doorbell;
++ *   bit1 (2) write UTRLCLR for the slot after each completed command;
++ *   bit2 (4) re-arm the request list before every command (what 0153 does);
++ *   bit3 (8) 1 ms pause before every command.
++ * No boot-arg keeps 0153's behaviour (bit2). */
++static uint32_t ufs_xnu;
++
+ static uint32_t ufs_seq;                /* commands submitted since boot */
+ static uint32_t ufs_ok_seq;             /* last command that completed */
+ static uint32_t ufs_ok_len;
+@@ -308,7 +319,9 @@
+ 		}
+ 	}
+ 	__builtin_arm_dsb(0xf);
+-	ufs_wr(REG_IS, ufs_rd(REG_IS));         /* acknowledge completion status */
++	if (!(ufs_xnu & 1)) {
++		ufs_wr(REG_IS, ufs_rd(REG_IS)); /* acknowledge completion status */
++	}
+ 
+ 	/* The doorbell can clear as soon as the host fetches the descriptor,
+ 	 * well before the controller writes OCS back. The shim measured ~115 ms
+@@ -325,6 +338,12 @@
+ 		delay(10);
+ 	}
+ 	dma_sync(DMA_UTRL + slot * sizeof(*utrd), sizeof(*utrd));
++	if (ufs_xnu & 1) {
++		ufs_wr(REG_IS, ufs_rd(REG_IS)); /* R10: ack after the completion */
++	}
++	if (ufs_xnu & 2) {
++		ufs_wr(REG_UTRLCLR, su.gs101 ? slot_bit : ~slot_bit); /* R10 */
++	}
+ 	if (su.cache) {
+ 		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
+ 	} else {
+@@ -413,7 +432,12 @@
+ 		 * the re-arm the retry does, so the host clears UTRLRSR after
+ 		 * every completed command and ignores doorbells until the list is
+ 		 * started again. Re-arm before each attempt, not just on retry. */
+-		ufs_rearm_list();
++		if (ufs_xnu & 4) {
++			ufs_rearm_list();
++		}
++		if (ufs_xnu & 8) {
++			delay(1);
++		}
+ 		error = ufs_scsi_once(cdb, cdb_len, len, write, bounce_off);
+ 		if (!error) {
+ 			return 0;
+@@ -861,6 +885,12 @@
+ 	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
+ 	su.cache = (cache == 1);
+ 	su.wait = (wait == 1);
++	PE_parse_boot_argn("ufsxnu", &ufs_xnu, sizeof(ufs_xnu));
++	if (!ufs_xnu) {
++		ufs_xnu = 4;            /* 0153's behaviour when the arg is absent */
++	}
++	printf("SWEET UFS: ufsxnu 0x%x (is-after-ocs %d, utrlclr %d, rearm %d, pause %d)\n",
++	    ufs_xnu, !!(ufs_xnu & 1), !!(ufs_xnu & 2), !!(ufs_xnu & 4), !!(ufs_xnu & 8));
+ 
+ 	su.regs = ml_io_map(reg[0], reg[1]);
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
