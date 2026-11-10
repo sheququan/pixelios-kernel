@@ -1,0 +1,89 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -84,16 +84,16 @@
+                                                  * = 128 entries, which fits PRDT_MAX (256). */
+ _Static_assert(BOUNCE_SIZE / PRDT_ENTRY_MAX <= PRDT_MAX,
+     "PRDT_MAX is too small for PRDT_ENTRY_MAX");
+-/* The controller also gives up on a command that carries too many PRD entries:
+- * the 541 KiB /sbin/launchd read became one READ(10) with 68 x 8 KiB entries
+- * and never completed (0x28 timed out, bootBT), while every mount-time read
+- * with one or two entries finished. Cap one command at 8 entries = 64 KiB and
+- * loop instead. The bounce buffer, the strategy request size and every check
+- * in sweet_ufs_strategy() stay exactly as they are. */
+-#define PRDT_CMD_ENTRIES  8u
+-#define PRDT_CMD_BYTES    (PRDT_CMD_ENTRIES * PRDT_ENTRY_MAX)   /* 64 KiB */
+-#define PRDT_CMD_BLOCKS   (PRDT_CMD_BYTES / UFS_BLOCK)          /* 16 blocks */
++/* R5: the shim measured a 541 KiB single READ(10) with 68 x 8 KiB PRD
++ * entries completing in ~0.96 s (bootBS2 / F47), so splitting one bio into
++ * several <=64 KiB commands is unnecessary and gives the controller extra
++ * chances to leave a pending UNIT ATTENTION. Keep the loop in the block
++ * helpers but let one iteration cover the whole request. */
++#define PRDT_CMD_ENTRIES  (BOUNCE_SIZE / PRDT_ENTRY_MAX)        /* 128 */
++#define PRDT_CMD_BYTES    BOUNCE_SIZE                           /* 1 MiB */
++#define PRDT_CMD_BLOCKS   (PRDT_CMD_BYTES / UFS_BLOCK)          /* 256 blocks */
+ _Static_assert(PRDT_CMD_BLOCKS > 0, "PRDT_CMD_BLOCKS must be non-zero");
++_Static_assert(PRDT_CMD_ENTRIES <= PRDT_MAX, "PRDT_CMD_ENTRIES exceeds PRDT_MAX");
+ #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
+ #define CMD_SPIN_NS     (50ull * NSEC_PER_USEC)
+ #define CMD_SLEEP_NS    (200ull * NSEC_PER_USEC)
+@@ -168,7 +168,7 @@
+  * (to the device when write is set). Returns 0 or an errno.
+  */
+ static int
+-ufs_scsi_at(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write,
++ufs_scsi_once(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write,
+     uint32_t bounce_off)
+ {
+ 	/* gs101: HCI_UTRL_NEXUS_TYPE is 0xFFFFFFFE, slot 0 is device management only: SCSI uses slot 1 */
+@@ -315,14 +315,50 @@
+ 	 * 0xffffffff means the target does not report a residual. */
+ 	uint32_t residual = ((uint32_t)ucd->resp[8] << 24) | ((uint32_t)ucd->resp[9] << 16) |
+ 	    ((uint32_t)ucd->resp[10] << 8) | (uint32_t)ucd->resp[11];
++	/* No-data commands (TEST UNIT READY, START STOP UNIT): sense/residual
++	 * bytes can be stale. Only a bad OCS or wrong UPIU type is a real
++	 * error - bootBW saw a good TUR rejected on residual 0x14. */
++	if (len == 0) {
++		if (ocs || ucd->resp[0] != 0x21) {
++			printf("SWEET UFS: no-data 0x%02x failed ocs 0x%x upiu 0x%x\n",
++			    cdb[0], ocs, ucd->resp[0]);
++			return EIO;
++		}
++		return 0;
++	}
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[5] || ucd->resp[6] ||
+-	    ucd->resp[7] || (len && residual && residual != 0xffffffffu)) {
++	    ucd->resp[7] || (residual && residual != 0xffffffffu)) {
+ 		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x resp 0x%x "
+ 		    "status 0x%x residual 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[4], ucd->resp[5], residual);
+ 		return EIO;
+ 	}
+ 	return 0;
++}
++
++/*
++ * A reset (or the first command after take-over) leaves a pending UNIT
++ * ATTENTION: the device accepts the doorbell but leaves OCS at its 0x0F
++ * preset, so the command times out and every later command fails the same
++ * way. bootCB / F51-F52 proved that one plain re-submission consumes the UA
++ * and the SAME command then completes. Retry instead of failing the bio.
++ */
++#define UFS_MAX_TRIES  3u
++static int
++ufs_scsi_at(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write,
++    uint32_t bounce_off)
++{
++	int error = 0;
++
++	for (unsigned attempt = 0; attempt < UFS_MAX_TRIES; attempt++) {
++		error = ufs_scsi_once(cdb, cdb_len, len, write, bounce_off);
++		if (!error) {
++			return 0;
++		}
++		printf("SWEET UFS: retry 0x%02x attempt %u err %d len %u\n",
++		    cdb[0], attempt, error, len);
++	}
++	return error;
+ }
+ 
+ /* One command that starts at the base of the bounce buffer: what every caller
