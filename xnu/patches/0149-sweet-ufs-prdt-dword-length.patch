@@ -1,0 +1,37 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -220,7 +220,14 @@
+ 			ucd->prdt[n].addr_hi = (uint32_t)((bounce_pa + done) >> 32);
+ 			ucd->prdt[n].dbc = chunk - 1;
+ 		}
+-		utrd->prdt = (1024u / gran) << 16 | (su.gs101 ? 16 * n : n);
++		/* R6: gs201's PRDT length field is a DWORD count, not an entry
++		 * count. The shim (which works) writes 4 * entries; this driver
++		 * wrote n, so a 64-entry 512 KiB read was read as 16 entries and
++		 * the controller transferred 128 KiB, then waited forever for the
++		 * rest - dbr cleared, OCS stayed at 0x0F, every retry timed out.
++		 * bootCF measured both encodings on one boot: DWORD count rc=0
++		 * (0.87 s for 512 KiB), entry count rc=1 (timeout). */
++		utrd->prdt = (1024u / gran) << 16 | (su.gs101 ? 16 * n : 4 * n);
+ 	}
+ 
+ 	if (su.cache) {
+@@ -337,12 +344,12 @@
+ }
+ 
+ /*
+- * R5 (bootCD) proved that re-submitting alone does not help: after the first
+- * rejection every retry timed out too, with OCS still at its 0x0F preset
+- * (dbr 0x0, is 0x0, hcs 0xf). The shim recovers the controller by RE-ARMING
+- * ITS REQUEST LIST (UTRLRSR 0 -> write UTRLBA/BAU -> UTRLRSR 1): bootBS2's
+- * revive does exactly that and the next command always worked. Do the same
+- * here before each retry, so a stuck run-list does not kill the whole bio.
++ * R5 (bootCD) showed a plain re-submission is not enough: every retry of a
++ * rejected command timed out too (OCS 0x0F, dbr 0x0, is 0x0, hcs 0xf). The
++ * shim recovers such a host by re-arming its request list (UTRLRSR 0 ->
++ * UTRLBA/BAU -> UTRLRSR 1), which is what its revive does before every
++ * retry. Keep that, plus the PRDT length fix above, so one bad request
++ * cannot take the whole bio down.
+  */
+ #define UFS_MAX_TRIES  3u
+ static void
