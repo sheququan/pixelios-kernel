@@ -1,0 +1,21 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -405,9 +405,15 @@
+ 	int error = 0;
+ 
+ 	for (unsigned attempt = 0; attempt < UFS_MAX_TRIES; attempt++) {
+-		if (attempt) {
+-			ufs_rearm_list();
+-		}
++		/* R9: bootCJ (0152, one PRD entry per command) failed on every
++		 * second command and succeeded on the ones in between -
++		 *   seq 46 failed, prev #47 worked, seq 50 failed, prev #49 worked
++		 * - with rsr 0x0 and the doorbell already clear. The only thing
++		 * that differs between a failing command and the one after it is
++		 * the re-arm the retry does, so the host clears UTRLRSR after
++		 * every completed command and ignores doorbells until the list is
++		 * started again. Re-arm before each attempt, not just on retry. */
++		ufs_rearm_list();
+ 		error = ufs_scsi_once(cdb, cdb_len, len, write, bounce_off);
+ 		if (!error) {
+ 			return 0;
