@@ -1,0 +1,55 @@
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -3509,6 +3509,30 @@
+ 	printf("SWEET CS: %s sig off %lld size %u err %d resid %d first %08x\n",
+ 	    vp->v_name, (long long)(macho_offset + lcp->dataoff), lcp->datasize,
+ 	    error, resid, addr ? *(const uint32_t *)(uintptr_t)addr : 0);
++	/*
++	 * SWEET (R16): dyld reads back as zeros from a file whose header parsed
++	 * fine, and the read reports success. Print what the file itself says about
++	 * its size, and probe its first and last page, so the next boot separates a
++	 * file that really is zero there (compressed / sparse / truncated on disk)
++	 * from a read that silently returns nothing.
++	 */
++	if (error == 0 && resid == 0) {
++		uint32_t probe[2] = { 0, 0 };
++		int perr = 0, presid = 0;
++
++		perr = vn_rdwr(UIO_READ, vp, (caddr_t)&probe[0], sizeof(uint32_t),
++		    macho_offset, UIO_SYSSPACE, 0, kauth_cred_get(), &presid,
++		    current_proc());
++		printf("SWEET CS: %s v_size %lld magic %08x (err %d resid %d)\n",
++		    vp->v_name, (long long)vp->v_size, probe[0], perr, presid);
++		if (vp->v_size > 2 * PAGE_SIZE) {
++			perr = vn_rdwr(UIO_READ, vp, (caddr_t)&probe[1],
++			    sizeof(uint32_t), vp->v_size - PAGE_SIZE, UIO_SYSSPACE, 0,
++			    kauth_cred_get(), &presid, current_proc());
++			printf("SWEET CS: %s last page %08x (err %d resid %d)\n",
++			    vp->v_name, probe[1], perr, presid);
++		}
++	}
+ 	if (error || resid != 0) {
+ 		ret = LOAD_IOERROR;
+ 		goto out;
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -762,6 +762,19 @@
+ 
+ 	case ESR_EC_UNCATEGORIZED:
+ 		assert(!ESR_ISS(esr));
++		/*
++		 * SWEET (R16): the print in sleh_synchronous() did not survive, most
++		 * likely because printf() from this context is not safe. kprintf right
++		 * here, at the point of use, so the faulting PC of launchd's SIGILL is
++		 * actually visible.
++		 */
++		if (is_user) {
++			uint32_t instr = 0;
++			COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
++			kprintf("SWEET SIGILL: pc %#llx instr %08x esr %#x far %#llx\n",
++			    (unsigned long long)get_saved_state_pc(state), instr, esr,
++			    (unsigned long long)far);
++		}
+ 
+ 		handle_uncategorized(&context->ss);
+ 		break;
