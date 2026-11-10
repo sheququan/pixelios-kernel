@@ -1,9 +1,9 @@
 --- a/bsd/kern/ubc_subr.c
 +++ b/bsd/kern/ubc_subr.c
-@@ -348,6 +348,17 @@
- }
+@@ -360,47 +360,58 @@
+  *		EBADEXEC		Invalid code signature
+  */
  
- /*
 +/*
 + * SWEET (R14): every genuine Apple signature from the iPhone rootfs is
 + * rejected here with EBADEXEC, and the only visible symptom is "unable to
@@ -15,10 +15,9 @@
 +	return EBADEXEC; \
 +} while (0)
 +
-  * cs_validate_codedirectory
-  *
-  * Validate that pointers inside the code directory to make sure that
-@@ -366,41 +377,41 @@
+ static int
+ cs_validate_codedirectory(const CS_CodeDirectory *cd, size_t length)
+ {
  	struct cs_hash const *hashtype;
  
  	if (length < sizeof(*cd)) {
