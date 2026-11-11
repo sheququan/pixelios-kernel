@@ -1,0 +1,114 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7773,6 +7773,21 @@
+ 			    (unsigned long long)load_result->entry_point,
+ 			    (unsigned)user_pp,
+ 			    (unsigned long long)((addr64_t)user_pp << PAGE_SHIFT));
++			/* SWEET (R29): parse_machfile() maps every Mach-O segment
++			 * with the control from ubc_getobject(vp).  If that is
++			 * NULL, the mapping is anonymous (IPC_PORT_NULL) and
++			 * vm_fault MUST zero-fill it - exactly the pp 0x0 plus
++			 * zero instructions we see.  Print the control to settle
++			 * whether the vnode has a pager at all. */
++			{
++				extern memory_object_control_t ubc_getobject(struct vnode *, int);
++				memory_object_control_t ctl = ubc_getobject(imgp->ip_vp, 0);
++
++				printf("SWEET UBCOBJ: %s control %p %s\n",
++				    imgp->ip_vp->v_name, (void *)ctl,
++				    ctl == MEMORY_OBJECT_CONTROL_NULL ?
++				    "NULL -> ANONYMOUS MAPPING" : "has pager");
++			}
+ 		}
+ 	}
+ 	if (kr != KERN_SUCCESS) {
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -1839,10 +1839,23 @@
+ 	load_result_t           *result)
+ {
+ 	vm_map_offset_t cur_offset, cur_start, cur_end;
+-	kern_return_t   ret;
++	kern_return_t   ret = KERN_SUCCESS;
+ 	vm_map_offset_t effective_page_mask;
+ 	vm_map_kernel_flags_t vmk_flags, cur_vmk_flags;
+ 
++	/* SWEET (R29): parse_machfile() passes ubc_getobject(vp) as the
++	 * memory-object control.  With copy=TRUE, vm_map_enter_mem_object_control()
++	 * calls vm_object_copy_strategically() and maps a shadow object whose pager
++	 * is NULL; on SWEET that shadow never sees the UPL pages committed by
++	 * vnode_pagein(), so vm_fault() zero-fills the text page (F91-F96).
++	 * Map the vnode's vm_object directly for this experiment.  The trace
++	 * settles whether a pager control exists at all. */
++#define SWEET_MAP_COPY FALSE
++	printf("SWEET MAPSEG: va %#llx-%#llx file %#llx-%#llx control %#lx copy %d\n",
++	    (unsigned long long)vm_start, (unsigned long long)vm_end,
++	    (unsigned long long)file_start, (unsigned long long)file_end,
++	    (unsigned long)(uintptr_t)control, (int)SWEET_MAP_COPY);
++
+ 	if (vm_end < vm_start ||
+ 	    file_end < file_start) {
+ 		return LOAD_BADMACHO;
+@@ -1896,7 +1909,7 @@
+ 				vmk_flags,
+ 				control,
+ 				file_start + cur_offset,
+-				TRUE, /* copy */
++				SWEET_MAP_COPY, /* copy */
+ 				initprot, maxprot,
+ 				VM_INHERIT_DEFAULT);
+ 		} else {
+@@ -1908,7 +1921,7 @@
+ 				vmk_flags,
+ 				IPC_PORT_NULL,
+ 				0, /* offset */
+-				TRUE, /* copy */
++				SWEET_MAP_COPY, /* copy */
+ 				initprot, maxprot,
+ 				VM_INHERIT_DEFAULT);
+ 		}
+@@ -1971,7 +1984,7 @@
+ 				cur_vmk_flags,
+ 				control,
+ 				file_start + cur_offset,
+-				TRUE, /* copy */
++				SWEET_MAP_COPY, /* copy */
+ 				initprot, maxprot,
+ 				VM_INHERIT_DEFAULT);
+ 		} else {
+@@ -1983,7 +1996,7 @@
+ 				cur_vmk_flags,
+ 				IPC_PORT_NULL,
+ 				0, /* offset */
+-				TRUE, /* copy */
++				SWEET_MAP_COPY, /* copy */
+ 				initprot, maxprot,
+ 				VM_INHERIT_DEFAULT);
+ 		}
+@@ -2013,7 +2026,7 @@
+ 				vmk_flags,
+ 				control,
+ 				file_start + cur_offset,
+-				TRUE, /* copy */
++				SWEET_MAP_COPY, /* copy */
+ 				initprot, maxprot,
+ 				VM_INHERIT_DEFAULT);
+ 		} else {
+@@ -2025,7 +2038,7 @@
+ 				vmk_flags,
+ 				IPC_PORT_NULL,
+ 				0, /* offset */
+-				TRUE, /* copy */
++				SWEET_MAP_COPY, /* copy */
+ 				initprot, maxprot,
+ 				VM_INHERIT_DEFAULT);
+ 		}
+@@ -2036,6 +2049,8 @@
+ 	}
+ #endif /* __arm64__ */
+ done:
++	printf("SWEET MAPSEG: done ret %d cur_end %#llx\n",
++	    (int)ret, (unsigned long long)cur_end);
+ 	assert(cur_end >= vm_start + (file_end - file_start));
+ 	return LOAD_SUCCESS;
+ }
