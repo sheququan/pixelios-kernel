@@ -1,0 +1,23 @@
+--- a/bsd/sweet_hfs/core/hfs_readwrite.c
++++ b/bsd/sweet_hfs/core/hfs_readwrite.c
+@@ -4600,6 +4600,20 @@
+ 	cp = VTOC(vp);
+ 	fp = VTOF(vp);
+ 
++	/*
++	 * SWEET (R23): R21 showed the exec'd user page is all zeroes while the
++	 * device holds real instructions.  cluster_pagein() is passed
++	 * fp->ff_size as the file size: if it is 0 (or smaller than the
++	 * requested offset) the cluster layer zero-fills every page without
++	 * issuing any I/O.  Print the pagein request and the two sizes so the
++	 * next boot says whether VNOP_PAGEIN is reached at all and which size
++	 * it uses.
++	 */
++	printf("SWEET PAGEIN: off %lld size %lu ploff %lu flags 0x%x ffsize %lld\n",
++	    (long long)ap->a_f_offset, (unsigned long)ap->a_size,
++	    (unsigned long)ap->a_pl_offset, (unsigned)ap->a_flags,
++	    (long long)fp->ff_size);
++
+ #if CONFIG_PROTECT
+ 	if ((error = cp_handle_vnop(vp, CP_READ_ACCESS | CP_WRITE_ACCESS, 0)) != 0) {
+ 		/* 
