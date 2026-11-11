@@ -1,0 +1,24 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7759,6 +7759,21 @@
+ 
+ 		printf("SWEET EXEC: %s insns %08x %08x %08x %08x (copyin %d)\n",
+ 		    imgp->ip_vp->v_name, insn[0], insn[1], insn[2], insn[3], cierr);
++		/* SWEET (R28): R27 proved the UPL physical page holds real
++		 * instructions while the user mapping reads zeroes.  Print the
++		 * physical page behind the user address so the two can be
++		 * compared directly.  pmap_find_phys is not exported to BSD. */
++		{
++			extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++			ppnum_t user_pp = pmap_find_phys(
++			    get_task_pmap(current_task()),
++			    (addr64_t)load_result->entry_point);
++
++			printf("SWEET USERPHYS: va %#llx pp 0x%x pa %#llx\n",
++			    (unsigned long long)load_result->entry_point,
++			    (unsigned)user_pp,
++			    (unsigned long long)((addr64_t)user_pp << PAGE_SHIFT));
++		}
+ 	}
+ 	if (kr != KERN_SUCCESS) {
+ 		DEBUG4K_ERROR("map %p va 0x%llx -> 0x%x\n", current_map(), (uint64_t)vm_map_trunc_page(load_result->entry_point, vm_map_page_mask(current_map())), kr);
