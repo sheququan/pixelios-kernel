@@ -1,0 +1,27 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -707,7 +707,7 @@
+ 			 * fine. Say what the filesystem asked us for and what came
+ 			 * back, so the next boot tells a wrong bmap from a wrong read.
+ 			 */
+-			if (count >= 16384) {
++			if (count >= 4096) {
+ 				printf("SWEET UFS: RD blkno %llu count %u sec %u off 0x%llx "
+ 				    "lba %llu skip %u want %u blocks %u err %d first %08x\n",
+ 				    (unsigned long long)buf_blkno(bp), count, su.secsize,
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1745,6 +1745,13 @@
+ 		panic("MSR/MRS trap (ESR 0x%x) from kernel", esr);
+ 	}
+ 
++	/* SWEET (R19): handle_uncategorized is not the only source of SIGILL;
++	 * an MSR/MRS trap to a system register this port does not emulate is
++	 * one too. Print the PC and the instruction so the launchd SIGILL can
++	 * be attributed. */
++	kprintf("SWEET MSR: pc %#llx esr %#x\n",
++	    (unsigned long long)get_saved_state_pc(state), esr);
++
+ 	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+ 	codes[1] = instr;
+ 
