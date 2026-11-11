@@ -1,0 +1,20 @@
+--- a/osfmk/vm/vm_pageout.c
++++ b/osfmk/vm/vm_pageout.c
+@@ -7605,6 +7605,17 @@
+ 	if (upl == UPL_NULL) {
+ 		return KERN_INVALID_ARGUMENT;
+ 	}
++	/* SWEET (R35): every file read on SWEET returns zeroes even though the
++	 * UFS driver fills the UPL with real instructions.  upl_commit_range()
++	 * uses upl->map_object to attach those pages to a vm_object; if that
++	 * association is missing the pages never reach the caller.  Say it out
++	 * loud once per large commit. */
++	if (upl->u_size >= 16384) {
++		printf("SWEET UPLOBJ: upl %p map_object %p uoff %#llx usz %#llx flags %#x\n",
++		    (void *)upl, (void *)upl->map_object,
++		    (unsigned long long)upl->u_offset,
++		    (unsigned long long)upl->u_size, (unsigned)flags);
++	}
+ 
+ 	dw_count = 0;
+ 	dw_limit = DELAYED_WORK_LIMIT(DEFAULT_DELAYED_WORK_LIMIT);
