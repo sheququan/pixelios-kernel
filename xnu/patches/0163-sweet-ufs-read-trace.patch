@@ -1,0 +1,26 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -698,6 +698,23 @@
+ 			if (!error) {
+ 				memcpy(vaddr + done, (const char *)bounce + skip, want);
+ 			}
++			/*
++			 * SWEET (R18): /usr/lib/dyld's signature is read as 25280
++			 * zero bytes even though the very same bytes are present in
++			 * ios-root.img (checked offline through the HFS catalog).
++			 * Its read starts in the last block of extent 3 and crosses
++			 * into extent 4; launchd's does not cross an extent and reads
++			 * fine. Say what the filesystem asked us for and what came
++			 * back, so the next boot tells a wrong bmap from a wrong read.
++			 */
++			if (count >= 16384) {
++				printf("SWEET UFS: RD blkno %llu count %u sec %u off 0x%llx "
++				    "lba %llu skip %u want %u blocks %u err %d first %08x\n",
++				    (unsigned long long)buf_blkno(bp), count, su.secsize,
++				    (unsigned long long)pos, (unsigned long long)lba,
++				    skip, want, blocks, error,
++				    *(const uint32_t *)(vaddr + done));
++			}
+ 		} else {
+ 			/* Partial device blocks at either end: read, merge, write back. */
+ 			if (skip || (want % UFS_BLOCK)) {
