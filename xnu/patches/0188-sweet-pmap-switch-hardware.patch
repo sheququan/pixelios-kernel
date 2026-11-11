@@ -1,0 +1,21 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7983,6 +7983,18 @@
+ 				    (unsigned)pmap_find_phys(tgt_pmap, (addr64_t)page));
+ 			}
+ 			pp_after = pmap_find_phys(tgt_pmap, (addr64_t)page);
++			/* R41: R40 wired the real physical page into BOTH the current
++			 * and the target pmap (cur_pp == tgt_pp == pn, both kr 0),
++			 * yet copyin() and the CPU still read zeroes.  The only
++			 * remaining explanation is that TTBR0 still points at a
++			 * third (pre-exec) pmap.  Switch the hardware page table
++			 * explicitly before reading the entry back. */
++			{
++				extern void pmap_switch(pmap_t);
++				pmap_switch(tgt_pmap);
++				printf("SWEET PMAPSW: switched to tgt %p\n",
++				    (void *)tgt_pmap);
++			}
+ 			ci2 = copyin(entry, (char *)chk2, sizeof(chk2));
+ 			printf("SWEET PMAPFILL: seg %d vp %p cur %p tgt %p va %#llx foff %#llx bpn %lld bpns %lld %lld %lld %lld berr %d run %lu pa %#llx pn 0x%x kr %d rd %d resid %d pp 0x%x src %08x %08x %08x %08x insns %08x %08x %08x %08x (copyin %d)\n",
+ 			    seg, (void *)evp, (void *)cur_pmap, (void *)tgt_pmap,
