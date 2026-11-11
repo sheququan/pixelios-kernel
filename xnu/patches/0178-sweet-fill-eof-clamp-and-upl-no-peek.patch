@@ -1,0 +1,61 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7800,6 +7800,7 @@
+ 			extern uint64_t sweet_seg_va[], sweet_seg_off[], sweet_seg_len[];
+ 			extern struct vnode *sweet_seg_vp[];
+ 			extern int sweet_seg_count;
++			extern off_t ubc_getsize(struct vnode *);
+ 			static char sweet_page[PAGE_SIZE];
+ 			int si, filled = 0, rd_bad = 0, co_bad = 0;
+ 
+@@ -7809,6 +7810,18 @@
+ 				uint64_t off = sweet_seg_off[si];
+ 				uint64_t left = sweet_seg_len[si];
+ 				uint64_t pos = 0;
++				off_t fsz = ubc_getsize(svp);
++
++				/* SWEET (R31): file_end is round_page()'d, so the tail
++				 * of the last segment lies past EOF.  Reading it in R30
++				 * produced a UPL with a sentinel physical page number
++				 * and a data abort in ml_phys_read_word_64().  Clamp
++				 * the forced fill to the real file size. */
++				if (fsz <= (off_t)off) {
++					left = 0;
++				} else if (left > (uint64_t)(fsz - (off_t)off)) {
++					left = (uint64_t)(fsz - (off_t)off);
++				}
+ 
+ 				while (pos < left) {
+ 					size_t n = (size_t)(PAGE_SIZE -
+--- a/bsd/vfs/vfs_cluster.c
++++ b/bsd/vfs/vfs_cluster.c
+@@ -1006,22 +1006,18 @@
+ 			}
+ 			printf("SWEET CLFLAGS: upl_flags 0x%x commit %d flags 0x%x\n",
+ 			    upl_flags, commit_size, b_flags);
+-			/* SWEET (R27): read the UPL's own physical page, bypassing
+-			 * the kernel virtual mapping the driver wrote through.
+-			 * If this is a real instruction, the UPL is correct and the
+-			 * bug is in vm_object/pmap; if it is zero, buf_map()'s
+-			 * mapping never reached the UPL page. */
++			/* SWEET (R31): R30 proved ml_phys_read_word_64() can be handed
++			 * a sentinel UPL page number (pa 0x8fffe00000, far in the
++			 * phystokv window) by a page-in beyond EOF, and reading it
++			 * panics in _ml_phys_read_data (pc 0xfffffe000749670c).
++			 * Keep the address trace but never touch that memory. */
+ 			{
+ 				upl_page_info_t *pl = ubc_upl_pageinfo(upl);
+ 				addr64_t pa = ((addr64_t)upl_phys_page(pl, 0) << PAGE_SHIFT)
+ 				    + (addr64_t)(upl_offset & PAGE_MASK);
+ 
+-				printf("SWEET UPLPHYS: pa %#llx words %08x %08x %08x %08x\n",
+-				    (unsigned long long)pa,
+-				    ml_phys_read_word_64(pa),
+-				    ml_phys_read_word_64(pa + 4),
+-				    ml_phys_read_word_64(pa + 8),
+-				    ml_phys_read_word_64(pa + 12));
++				printf("SWEET UPLPHYS: pa %#llx (no peek)\n",
++				    (unsigned long long)pa);
+ 			}
+ 
+ 			if (b_flags & B_AGE) {
