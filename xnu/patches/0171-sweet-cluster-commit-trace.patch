@@ -1,0 +1,29 @@
+--- a/bsd/vfs/vfs_cluster.c
++++ b/bsd/vfs/vfs_cluster.c
+@@ -894,6 +894,12 @@
+ 		}
+ 	}
+ 	if (zero_offset) {
++		/* SWEET (R24): cluster_zero() may be wiping the page we just
++		 * filled.  Print the numbers before it runs. */
++		printf("SWEET CLDONE: zero_offset %d uploff %d trans %d flags 0x%x "
++		    "error %d resid %d page_mask 0x%llx\n",
++		    zero_offset, upl_offset, transaction_size, b_flags,
++		    error, total_resid, (unsigned long long)PAGE_MASK);
+ 		cluster_zero(upl, zero_offset, PAGE_SIZE - (zero_offset & PAGE_MASK), real_bp);
+ 	}
+ 
+@@ -962,6 +968,13 @@
+ 	if (b_flags & B_COMMIT_UPL) {
+ 		pg_offset   = upl_offset & PAGE_MASK;
+ 		commit_size = (pg_offset + transaction_size + (PAGE_SIZE - 1)) & ~PAGE_MASK;
++		/* SWEET (R24): an error here aborts the UPL and DISCARDS the
++		 * pages, which is the only path that can turn real driver data
++		 * into a zero page. */
++		printf("SWEET CLCOMMIT: error %d resid %d uploff %d pg %d "
++		    "commit %d flags 0x%x\n",
++		    error, total_resid, upl_offset, pg_offset, commit_size,
++		    b_flags);
+ 
+ 		if (error) {
+ 			upl_set_iodone_error(upl, error);
