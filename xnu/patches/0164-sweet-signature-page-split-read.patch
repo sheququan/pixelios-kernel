@@ -1,0 +1,52 @@
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -3488,17 +3488,39 @@
+ 		goto out;
+ 	}
+ 
++	/*
++	 * SWEET (R19): a single vn_rdwr() of a code signature that starts in the
++	 * middle of a page and crosses an HFS extent boundary comes back all
++	 * zeros even though the device has the bytes and reports no error:
++	 *   dyld sig off 897632 size 25280 err 0 resid 0 first 00000000
++	 * while the same signature in ios-root.img starts with fade0cc0. R18's
++	 * strategy trace shows the driver never sees that read at all, so the
++	 * UBC/cluster path zero-fills it. Split the request at page boundaries:
++	 * each request then maps exactly one page (and one extent), which the
++	 * cluster layer handles correctly.
++	 */
+ 	resid = 0;
+-	error = vn_rdwr(UIO_READ,
+-	    vp,
+-	    (caddr_t) addr,
+-	    lcp->datasize,
+-	    macho_offset + lcp->dataoff,
+-	    UIO_SYSSPACE,
+-	    0,
+-	    kauth_cred_get(),
+-	    &resid,
+-	    current_proc());
++	error = 0;
++	for (uint32_t done = 0; done < lcp->datasize && !error; ) {
++		off_t at = macho_offset + lcp->dataoff + done;
++		uint32_t chunk = lcp->datasize - done;
++		uint32_t to_page = (uint32_t)(PAGE_SIZE - (at & (PAGE_SIZE - 1)));
++
++		if (chunk > to_page) {
++			chunk = to_page;
++		}
++		int part_resid = 0;
++
++		error = vn_rdwr(UIO_READ, vp, (caddr_t)addr + done, chunk, at,
++		    UIO_SYSSPACE, 0, kauth_cred_get(), &part_resid,
++		    current_proc());
++		if (error == 0 && part_resid != 0) {
++			error = EIO;
++			resid = part_resid;
++			break;
++		}
++		done += chunk;
++	}
+ 	/*
+ 	 * SWEET (R14): dyld's signature blob came back as four zero words even
+ 	 * though vn_rdwr is expected to report a full read here, i.e. the pager
