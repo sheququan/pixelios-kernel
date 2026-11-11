@@ -1,0 +1,23 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7968,6 +7968,20 @@
+ 			    (vm_map_address_t)page, pn,
+ 			    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
+ 			    VM_PROT_READ, 0, TRUE);
++			/* R40: cur and tgt really are different pmaps, and
++			 * wiring only tgt still leaves copyin() reading zeroes.
++			 * Wire the same physical page into both so whichever
++			 * pmap the hardware currently uses sees the real code. */
++			{
++				kern_return_t pkr2 = pmap_enter(cur_pmap,
++				    (vm_map_address_t)page, pn,
++				    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
++				    VM_PROT_READ, 0, TRUE);
++				printf("SWEET PMAP2: cur_kr %d tgt_kr %d cur_pp 0x%x tgt_pp 0x%x\n",
++				    (int)pkr2, (int)pkr,
++				    (unsigned)pmap_find_phys(cur_pmap, (addr64_t)page),
++				    (unsigned)pmap_find_phys(tgt_pmap, (addr64_t)page));
++			}
+ 			pp_after = pmap_find_phys(tgt_pmap, (addr64_t)page);
+ 			ci2 = copyin(entry, (char *)chk2, sizeof(chk2));
+ 			printf("SWEET PMAPFILL: seg %d vp %p cur %p tgt %p va %#llx foff %#llx bpn %lld bpns %lld %lld %lld %lld berr %d run %lu pa %#llx pn 0x%x kr %d rd %d resid %d pp 0x%x src %08x %08x %08x %08x insns %08x %08x %08x %08x (copyin %d)\n",
