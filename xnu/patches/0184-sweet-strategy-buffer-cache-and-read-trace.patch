@@ -1,0 +1,115 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -655,6 +655,14 @@
+ 	return 0;
+ }
+ 
++/* SWEET (R37): remember the buffers the strategy path has already filled.
++ * R36 proved VNOP_BLOCKMAP()+READ(10) returns zero words even though the
++ * strategy path always has real instructions, so prefer those exact bytes. */
++#define SWEET_RC_N 128
++static char sweet_rc_data[SWEET_RC_N][PAGE_SIZE];
++static uint64_t sweet_rc_blkno[SWEET_RC_N];
++static int sweet_rc_n;
++
+ static void
+ sweet_ufs_strategy(buf_t bp)
+ {
+@@ -765,6 +773,15 @@
+ 		buf_setresid(bp, count - done);
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
++	/* SWEET (R37): save this read before the UPL mapping goes away. */
++	if (rd && count >= PAGE_SIZE) {
++		int ri = sweet_rc_n % SWEET_RC_N;
++
++		sweet_rc_blkno[ri] = (uint64_t)buf_blkno(bp);
++		memcpy(sweet_rc_data[ri], vaddr,
++		    MIN(count, (uint32_t)PAGE_SIZE));
++		sweet_rc_n++;
++	}
+ 	buf_unmap(bp);
+ 
+ done:
+@@ -788,31 +805,64 @@
+ int
+ sweet_ufs_read_at(daddr64_t blkno, uint32_t bytes, void *dst)
+ {
+-	uint64_t pos;
+-	uint64_t lba;
+-	uint32_t skip;
+-	uint32_t blocks;
+-	int error;
++	uint32_t units[2], want;
++	int ui, i, error = EINVAL, hit = -1;
+ 
+ 	if (dst == NULL || bytes == 0 || blkno < 0 || !su.nblocks) {
+ 		return EINVAL;
+ 	}
+-	pos = (uint64_t)blkno * su.secsize;
+-	lba = pos / UFS_BLOCK;
+-	skip = (uint32_t)(pos % UFS_BLOCK);
+-	blocks = (uint32_t)((skip + bytes + UFS_BLOCK - 1) / UFS_BLOCK);
+-	if (blocks * UFS_BLOCK > BOUNCE_SIZE) {
+-		return EINVAL;
+-	}
++	want = MIN(bytes, (uint32_t)PAGE_SIZE);
+ 
++	/* 1. the bytes the strategy path already copied into its UPL. */
++	for (i = 0; i < sweet_rc_n && i < SWEET_RC_N; i++) {
++		if (sweet_rc_blkno[i] == (uint64_t)blkno) {
++			memcpy(dst, sweet_rc_data[i], want);
++			printf("SWEET UFSREAD: cache hit bpn %lld n %d\n",
++			    (long long)blkno, sweet_rc_n);
++			return 0;
++		}
++	}
++	printf("SWEET UFSREAD: miss bpn %lld n %d last %lld\n",
++	    (long long)blkno, sweet_rc_n,
++	    sweet_rc_n ? (long long)sweet_rc_blkno[(sweet_rc_n - 1) % SWEET_RC_N] : -1LL);
++
++	/* 2. direct READ(10); print the bounce words and try both block units
++	 * (512-byte sectors and 4 KiB allocation blocks) in case HFS's
++	 * VNOP_BLOCKMAP() returns one or the other. */
++	units[0] = su.secsize ? su.secsize : DEV_BSIZE;
++	units[1] = UFS_BLOCK;
+ 	lck_mtx_lock(&sweet_ufs_lock);
+-	error = ufs_read_blocks(su.first_block + lba, blocks);
+-	if (!error) {
+-		memcpy(dst, (const char *)(uintptr_t)(su.dma + DMA_BOUNCE) + skip,
+-		    bytes);
++	for (ui = 0; ui < 2; ui++) {
++		uint64_t pos = (uint64_t)blkno * units[ui];
++		uint64_t lba = pos / UFS_BLOCK;
++		uint32_t skip = (uint32_t)(pos % UFS_BLOCK);
++		uint32_t blocks = (uint32_t)((skip + want + UFS_BLOCK - 1) /
++		    UFS_BLOCK);
++		const char *src;
++		uint32_t w[4] = { 0, 0, 0, 0 };
++
++		if (!blocks || blocks * UFS_BLOCK > BOUNCE_SIZE) {
++			continue;
++		}
++		error = ufs_read_blocks(su.first_block + lba, blocks);
++		if (error) {
++			printf("SWEET UFSREAD: unit %u err %d\n", units[ui], error);
++			continue;
++		}
++		src = (const char *)(uintptr_t)(su.dma + DMA_BOUNCE) + skip;
++		memcpy(w, src, sizeof(w));
++		printf("SWEET UFSREAD: unit %u lba %llu skip %u w %08x %08x %08x %08x\n",
++		    units[ui], (unsigned long long)lba, skip,
++		    w[0], w[1], w[2], w[3]);
++		if ((w[0] | w[1] | w[2] | w[3]) != 0) {
++			memcpy(dst, src, want);
++			hit = ui;
++			break;
++		}
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+-	return error;
++	printf("SWEET UFSREAD: chosen %d err %d\n", hit, error);
++	return hit >= 0 ? 0 : (error ? error : EINVAL);
+ }
+ 
+ static int
