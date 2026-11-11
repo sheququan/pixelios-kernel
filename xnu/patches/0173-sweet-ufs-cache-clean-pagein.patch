@@ -1,0 +1,27 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -697,6 +697,24 @@
+ 			error = ufs_read_blocks(su.first_block + lba, blocks);
+ 			if (!error) {
+ 				memcpy(vaddr + done, (const char *)bounce + skip, want);
++				/*
++				 * SWEET (R26): R21-R25 showed real instructions in
++				 * vaddr after this memcpy, while the user mapping reads
++				 * back four zero words.  SET_DIRTY, disabling
++				 * cluster_zero and skipping buf_unmap all failed, so
++				 * the remaining suspect is cache coherency: these
++				 * stores may still be in the data cache when the
++				 * physical page is handed to the pager.  Clean the
++				 * range to PoC before the buffer is completed.
++				 */
++				clean_dcache((vm_offset_t)(uintptr_t)(vaddr + done),
++				    want, FALSE);
++				__builtin_arm_dsb(0xf);
++				if (count >= 4096) {
++					printf("SWEET CACHE: va %#llx word %08x len %u\n",
++					    (unsigned long long)(uintptr_t)(vaddr + done),
++					    *(const uint32_t *)(vaddr + done), want);
++				}
+ 			}
+ 			/*
+ 			 * SWEET (R18): /usr/lib/dyld's signature is read as 25280
