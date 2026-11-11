@@ -1,0 +1,36 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7906,6 +7906,12 @@
+ 			int rd, resid = 0, ci2, si, seg = -1, berr = -1, bi;
+ 			daddr64_t bpn = 0, sub_bpns[4] = { 0, 0, 0, 0 };
+ 			size_t run = 0;
++			/* R39: exec can target a task other than current_task()
++			 * (kern_exec.c:1702 uses swap_task_map for exactly that
++			 * case).  R38 wired the real page into current_task()'s
++			 * pmap, so src was real but copyin() still read zeroes. */
++			pmap_t cur_pmap = get_task_pmap(current_task());
++			pmap_t tgt_pmap = get_task_pmap(proc_task(p));
+ 
+ 			/* entry - mach_header is NOT the file offset on SWEET:
+ 			 * R32 computed 0x11c000, far past launchd's 541 KB EOF,
+@@ -7958,15 +7964,15 @@
+ 			memcpy(src, pmap_page + (entry - page), sizeof(src));
+ 			pa = kvtophys((vm_offset_t)pmap_page);
+ 			pn = (ppnum_t)(pa >> PAGE_SHIFT);
+-			pkr = pmap_enter(get_task_pmap(current_task()),
++			pkr = pmap_enter(tgt_pmap,
+ 			    (vm_map_address_t)page, pn,
+ 			    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
+ 			    VM_PROT_READ, 0, TRUE);
+-			pp_after = pmap_find_phys(get_task_pmap(current_task()),
+-			    (addr64_t)page);
++			pp_after = pmap_find_phys(tgt_pmap, (addr64_t)page);
+ 			ci2 = copyin(entry, (char *)chk2, sizeof(chk2));
+-			printf("SWEET PMAPFILL: seg %d vp %p va %#llx foff %#llx bpn %lld bpns %lld %lld %lld %lld berr %d run %lu pa %#llx pn 0x%x kr %d rd %d resid %d pp 0x%x src %08x %08x %08x %08x insns %08x %08x %08x %08x (copyin %d)\n",
+-			    seg, (void *)evp, (unsigned long long)page,
++			printf("SWEET PMAPFILL: seg %d vp %p cur %p tgt %p va %#llx foff %#llx bpn %lld bpns %lld %lld %lld %lld berr %d run %lu pa %#llx pn 0x%x kr %d rd %d resid %d pp 0x%x src %08x %08x %08x %08x insns %08x %08x %08x %08x (copyin %d)\n",
++			    seg, (void *)evp, (void *)cur_pmap, (void *)tgt_pmap,
++			    (unsigned long long)page,
+ 			    (unsigned long long)fpage, (long long)bpn,
+ 			    (long long)sub_bpns[0], (long long)sub_bpns[1],
+ 			    (long long)sub_bpns[2], (long long)sub_bpns[3],
