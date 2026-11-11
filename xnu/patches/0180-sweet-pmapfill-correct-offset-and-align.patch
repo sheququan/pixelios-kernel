@@ -1,0 +1,86 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7864,9 +7864,9 @@
+ 				    sweet_seg_count, filled, rd_bad, co_bad,
+ 				    chk[0], chk[1], chk[2], chk[3], ck);
+ 			}
+-			sweet_seg_count = 0;
++			/* keep the segment table: the pmap_enter pass below needs it */
+ 		}
+-		/* SWEET (R32): R31 wrote all 91 page blocks with copyout() without
++		/* SWEET (R32/R33): R31 wrote all 91 page blocks with copyout() without
+ 		 * a single error, yet copyin() still returned four zero words:
+ 		 * the fault path hands out a fresh zero page instead of keeping
+ 		 * the page just written.  Bypass vm_object entirely -- read the
+@@ -7878,23 +7878,46 @@
+ 			    ppnum_t, vm_prot_t, vm_prot_t, unsigned int, boolean_t);
+ 			extern uint64_t kvtophys(vm_offset_t);
+ 			extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+-			static char pmap_page[PAGE_SIZE];
++			extern uint64_t sweet_seg_va[], sweet_seg_off[], sweet_seg_len[];
++			extern int sweet_seg_count;
++			/* R32's buffer was not PAGE_SIZE aligned: kvtophys()
++			 * returned pa 0x882301cb1 (offset 0xcb1 inside the
++			 * page), so pmap_enter() mapped the wrong part of the
++			 * physical page.  Align by hand, no linker attribute. */
++			static char pmap_page_raw[PAGE_SIZE * 2];
++			char *pmap_page = (char *)(((uintptr_t)pmap_page_raw +
++			    PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1));
+ 			user_addr_t entry = (user_addr_t)load_result->entry_point;
+ 			user_addr_t page = entry & ~(user_addr_t)(PAGE_SIZE - 1);
+-			off_t foff = (off_t)(entry -
+-			    (user_addr_t)load_result->mach_header);
+-			off_t fpage = foff & ~(off_t)(PAGE_SIZE - 1);
++			off_t fpage = 0;
+ 			uint64_t pa;
+ 			ppnum_t pn, pp_after;
+ 			kern_return_t pkr;
+-			uint32_t chk2[4] = { 0, 0, 0, 0 };
+-			int rd, resid = 0, ci2;
++			uint32_t chk2[4] = { 0, 0, 0, 0 }, src[4] = { 0, 0, 0, 0 };
++			int rd, resid = 0, ci2, si, seg = -1;
++
++			/* entry - mach_header is NOT the file offset on SWEET:
++			 * R32 computed 0x11c000, far past launchd's 541 KB EOF,
++			 * and therefore inserted a page full of zeroes.  Find
++			 * the recorded segment containing the entry instead. */
++			for (si = 0; si < sweet_seg_count && si < 32; si++) {
++				uint64_t sva = sweet_seg_va[si];
++				if (entry >= sva &&
++				    entry < sva + sweet_seg_len[si]) {
++					seg = si;
++					fpage = (off_t)((sweet_seg_off[si] +
++					    (entry - sva)) &
++					    ~(uint64_t)(PAGE_SIZE - 1));
++					break;
++				}
++			}
+ 
+ 			memset(pmap_page, 0, PAGE_SIZE);
+ 			rd = vn_rdwr(UIO_READ, imgp->ip_vp, pmap_page,
+ 			    (int)PAGE_SIZE, fpage, UIO_SYSSPACE, 0,
+ 			    vfs_context_ucred(imgp->ip_vfs_context), &resid,
+ 			    vfs_context_proc(imgp->ip_vfs_context));
++			memcpy(src, pmap_page + (entry - page), sizeof(src));
+ 			pa = kvtophys((vm_offset_t)pmap_page);
+ 			pn = (ppnum_t)(pa >> PAGE_SHIFT);
+ 			pkr = pmap_enter(get_task_pmap(current_task()),
+@@ -7904,11 +7927,13 @@
+ 			pp_after = pmap_find_phys(get_task_pmap(current_task()),
+ 			    (addr64_t)page);
+ 			ci2 = copyin(entry, (char *)chk2, sizeof(chk2));
+-			printf("SWEET PMAPFILL: va %#llx foff %#llx pa %#llx pn 0x%x kr %d rd %d pp 0x%x insns %08x %08x %08x %08x (copyin %d)\n",
+-			    (unsigned long long)page, (unsigned long long)fpage,
+-			    (unsigned long long)pa, (unsigned)pn, (int)pkr, rd,
+-			    (unsigned)pp_after, chk2[0], chk2[1], chk2[2], chk2[3],
+-			    ci2);
++			printf("SWEET PMAPFILL: seg %d va %#llx foff %#llx pa %#llx pn 0x%x kr %d rd %d resid %d pp 0x%x src %08x %08x %08x %08x insns %08x %08x %08x %08x (copyin %d)\n",
++			    seg, (unsigned long long)page,
++			    (unsigned long long)fpage, (unsigned long long)pa,
++			    (unsigned)pn, (int)pkr, rd, resid,
++			    (unsigned)pp_after,
++			    src[0], src[1], src[2], src[3],
++			    chk2[0], chk2[1], chk2[2], chk2[3], ci2);
+ 		}
+ 	}
+ 	if (kr != KERN_SUCCESS) {
