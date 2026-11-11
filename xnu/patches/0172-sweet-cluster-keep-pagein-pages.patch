@@ -1,0 +1,35 @@
+--- a/bsd/vfs/vfs_cluster.c
++++ b/bsd/vfs/vfs_cluster.c
+@@ -900,7 +900,16 @@
+ 		    "error %d resid %d page_mask 0x%llx\n",
+ 		    zero_offset, upl_offset, transaction_size, b_flags,
+ 		    error, total_resid, (unsigned long long)PAGE_MASK);
+-		cluster_zero(upl, zero_offset, PAGE_SIZE - (zero_offset & PAGE_MASK), real_bp);
++		/*
++		 * SWEET (R25): cluster_zero() uses bzero_phys() on the physical
++		 * pages of the UPL.  On this port the 16 KiB VM page and the 4 KiB
++		 * HFS allocation block do not line up, and R24 showed it running
++		 * with zero_offset 5400 inside a transaction of only 8192 bytes,
++		 * i.e. it can wipe data the driver just read.  A read-only root
++		 * does not need EOF tail zeroing (the pages come from the UPL and
++		 * are zeroed on allocation anyway), so skip it.
++		 */
++		/* cluster_zero(upl, zero_offset, PAGE_SIZE - (zero_offset & PAGE_MASK), real_bp); */
+ 	}
+ 
+ 	verify_ctx = cbp_head->b_attr.ba_verify_ctx;
+@@ -986,6 +995,14 @@
+ 			if ((b_flags & B_PHYS) && (b_flags & B_READ)) {
+ 				upl_flags |= UPL_COMMIT_SET_DIRTY;
+ 			}
++			/* SWEET (R25): the UFS driver fills UPL pages by DMA/memcpy
++			 * without going through the normal BIO path; mark pagein
++			 * pages dirty so the VM keeps their contents. */
++			if ((b_flags & B_PAGEIO) && (b_flags & B_READ)) {
++				upl_flags |= UPL_COMMIT_SET_DIRTY;
++			}
++			printf("SWEET CLFLAGS: upl_flags 0x%x commit %d flags 0x%x\n",
++			    upl_flags, commit_size, b_flags);
+ 
+ 			if (b_flags & B_AGE) {
+ 				upl_flags |= UPL_COMMIT_INACTIVATE;
