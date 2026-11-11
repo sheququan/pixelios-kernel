@@ -1,0 +1,53 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7866,6 +7866,50 @@
+ 			}
+ 			sweet_seg_count = 0;
+ 		}
++		/* SWEET (R32): R31 wrote all 91 page blocks with copyout() without
++		 * a single error, yet copyin() still returned four zero words:
++		 * the fault path hands out a fresh zero page instead of keeping
++		 * the page just written.  Bypass vm_object entirely -- read the
++		 * entry page into a kernel page and insert that physical page
++		 * into the new pmap with pmap_enter(), wired so it cannot be
++		 * reclaimed before the process starts executing. */
++		{
++			extern kern_return_t pmap_enter(pmap_t, vm_map_address_t,
++			    ppnum_t, vm_prot_t, vm_prot_t, unsigned int, boolean_t);
++			extern uint64_t kvtophys(vm_offset_t);
++			extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
++			static char pmap_page[PAGE_SIZE];
++			user_addr_t entry = (user_addr_t)load_result->entry_point;
++			user_addr_t page = entry & ~(user_addr_t)(PAGE_SIZE - 1);
++			off_t foff = (off_t)(entry -
++			    (user_addr_t)load_result->mach_header);
++			off_t fpage = foff & ~(off_t)(PAGE_SIZE - 1);
++			uint64_t pa;
++			ppnum_t pn, pp_after;
++			kern_return_t pkr;
++			uint32_t chk2[4] = { 0, 0, 0, 0 };
++			int rd, resid = 0, ci2;
++
++			memset(pmap_page, 0, PAGE_SIZE);
++			rd = vn_rdwr(UIO_READ, imgp->ip_vp, pmap_page,
++			    (int)PAGE_SIZE, fpage, UIO_SYSSPACE, 0,
++			    vfs_context_ucred(imgp->ip_vfs_context), &resid,
++			    vfs_context_proc(imgp->ip_vfs_context));
++			pa = kvtophys((vm_offset_t)pmap_page);
++			pn = (ppnum_t)(pa >> PAGE_SHIFT);
++			pkr = pmap_enter(vm_map_pmap(current_map()),
++			    (vm_map_address_t)page, pn,
++			    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
++			    VM_PROT_READ, 0, TRUE);
++			pp_after = pmap_find_phys(get_task_pmap(current_task()),
++			    (addr64_t)page);
++			ci2 = copyin(entry, (char *)chk2, sizeof(chk2));
++			printf("SWEET PMAPFILL: va %#llx foff %#llx pa %#llx pn 0x%x kr %d rd %d pp 0x%x insns %08x %08x %08x %08x (copyin %d)\n",
++			    (unsigned long long)page, (unsigned long long)fpage,
++			    (unsigned long long)pa, (unsigned)pn, (int)pkr, rd,
++			    (unsigned)pp_after, chk2[0], chk2[1], chk2[2], chk2[3],
++			    ci2);
++		}
+ 	}
+ 	if (kr != KERN_SUCCESS) {
+ 		DEBUG4K_ERROR("map %p va 0x%llx -> 0x%x\n", current_map(), (uint64_t)vm_map_trunc_page(load_result->entry_point, vm_map_page_mask(current_map())), kr);
