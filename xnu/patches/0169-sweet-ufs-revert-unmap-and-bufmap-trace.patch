@@ -1,0 +1,41 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -716,6 +716,19 @@
+ 				    skip, want, blocks, error,
+ 				    *(const uint32_t *)(vaddr + done),
+ 				    (unsigned)buf_flags(bp));
++				/* SWEET (R23): if the cluster/uio path reads a
++				 * different pointer than the one we filled, the
++				 * page is zero. */
++				{
++					caddr_t datap = (caddr_t)buf_dataptr(bp);
++
++					printf("SWEET BUFMAP: vaddr %#llx datap %#llx "
++					    "words %08x %08x\n",
++					    (unsigned long long)(uintptr_t)vaddr,
++					    (unsigned long long)(uintptr_t)datap,
++					    *(const uint32_t *)vaddr,
++					    datap ? *(const uint32_t *)datap : 0);
++				}
+ 			}
+ 		} else {
+ 			/* Partial device blocks at either end: read, merge, write back. */
+@@ -734,17 +747,7 @@
+ 		buf_setresid(bp, count - done);
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+-	/*
+-	 * SWEET (R22, experiment): R21 proved the driver memcpy()s real
+-	 * instructions into the buffer while the user mapping reads back four
+-	 * zero words and dies on udf #0.  buf_map() on a B_CLUSTER/UPL buffer
+-	 * uses ubc_upl_map(); test whether tearing that mapping down before
+-	 * buf_biodone() is what loses the page contents.  R21 (unconditional
+-	 * unmap) is the control; traditional non-cluster buffers still unmap.
+-	 */
+-	if (!(buf_flags(bp) & B_CLUSTER)) {
+-		buf_unmap(bp);
+-	}
++	buf_unmap(bp);
+ 
+ done:
+ 	if (error) {
