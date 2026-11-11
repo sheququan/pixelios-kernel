@@ -1,0 +1,40 @@
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -3512,7 +3512,7 @@
+ 		int part_resid = 0;
+ 
+ 		error = vn_rdwr(UIO_READ, vp, (caddr_t)addr + done, chunk, at,
+-		    UIO_SYSSPACE, 0, kauth_cred_get(), &part_resid,
++		    UIO_SYSSPACE, IO_NOCACHE, kauth_cred_get(), &part_resid,
+ 		    current_proc());
+ 		if (error == 0 && part_resid != 0) {
+ 			error = EIO;
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -640,7 +640,7 @@
+ 	 * jump into unmapped or zeroed memory (IABORT/DABORT or pc outside).
+ 	 */
+ 	if (is_user) {
+-		kprintf("SWEET EXC: thread %d pc %#llx esr %#x ec %u far %#llx\n",
++		printf("SWEET EXC: thread %d pc %#llx esr %#x ec %u far %#llx\n",
+ 		    thread_tid(current_thread()),
+ 		    (unsigned long long)get_saved_state_pc(state), esr,
+ 		    (unsigned)class, (unsigned long long)far);
+@@ -771,7 +771,7 @@
+ 		if (is_user) {
+ 			uint32_t instr = 0;
+ 			COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+-			kprintf("SWEET SIGILL: pc %#llx instr %08x esr %#x far %#llx\n",
++			printf("SWEET SIGILL: pc %#llx instr %08x esr %#x far %#llx\n",
+ 			    (unsigned long long)get_saved_state_pc(state), instr, esr,
+ 			    (unsigned long long)far);
+ 		}
+@@ -1749,7 +1749,7 @@
+ 	 * an MSR/MRS trap to a system register this port does not emulate is
+ 	 * one too. Print the PC and the instruction so the launchd SIGILL can
+ 	 * be attributed. */
+-	kprintf("SWEET MSR: pc %#llx esr %#x\n",
++	printf("SWEET MSR: pc %#llx esr %#x\n",
+ 	    (unsigned long long)get_saved_state_pc(state), esr);
+ 
+ 	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
