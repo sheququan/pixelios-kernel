@@ -1,0 +1,116 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7789,6 +7789,70 @@
+ 				    "NULL -> ANONYMOUS MAPPING" : "has pager");
+ 			}
+ 		}
++		/* SWEET (R30): R29 proved the vnode has a memory-object control
++		 * and that removing the shadow/copy object changes nothing: the
++		 * UPL holds real instructions but the user mapping stays zero.
++		 * Force each file-backed segment into the new address space with
++		 * copyout().  This runs after swap_task_map() and while the
++		 * thread is switched to the target map, so copyout() reaches the
++		 * new pmap; every write faults in a real, dirty page. */
++		{
++			extern uint64_t sweet_seg_va[], sweet_seg_off[], sweet_seg_len[];
++			extern struct vnode *sweet_seg_vp[];
++			extern int sweet_seg_count;
++			static char sweet_page[PAGE_SIZE];
++			int si, filled = 0, rd_bad = 0, co_bad = 0;
++
++			for (si = 0; si < sweet_seg_count && si < 32; si++) {
++				struct vnode *svp = sweet_seg_vp[si];
++				uint64_t va = sweet_seg_va[si];
++				uint64_t off = sweet_seg_off[si];
++				uint64_t left = sweet_seg_len[si];
++				uint64_t pos = 0;
++
++				while (pos < left) {
++					size_t n = (size_t)(PAGE_SIZE -
++					    ((va + pos) & (uint64_t)(PAGE_SIZE - 1)));
++					int resid = 0, rerr, cerr;
++
++					if (n > left - pos) {
++						n = (size_t)(left - pos);
++					}
++					memset(sweet_page, 0, PAGE_SIZE);
++					rerr = vn_rdwr(UIO_READ, svp, sweet_page,
++					    (int)n, (off_t)(off + pos),
++					    UIO_SYSSPACE, 0,
++					    vfs_context_ucred(imgp->ip_vfs_context),
++					    &resid,
++					    vfs_context_proc(imgp->ip_vfs_context));
++					if (rerr) {
++						rd_bad++;
++						break;
++					}
++					if (resid > 0 && resid <= (int)n) {
++						n -= (size_t)resid;
++					}
++					cerr = copyout(sweet_page,
++					    (user_addr_t)(va + pos), (vm_size_t)n);
++					if (cerr) {
++						co_bad++;
++					}
++					filled++;
++					pos += n;
++				}
++				vnode_put(svp);
++			}
++			{
++				uint32_t chk[4] = { 0, 0, 0, 0 };
++				int ck = copyin((user_addr_t)load_result->entry_point,
++				    (char *)chk, sizeof(chk));
++
++				printf("SWEET FILLPAGE: segs %d blocks %d rd_bad %d co_bad %d insns %08x %08x %08x %08x (copyin %d)\n",
++				    sweet_seg_count, filled, rd_bad, co_bad,
++				    chk[0], chk[1], chk[2], chk[3], ck);
++			}
++			sweet_seg_count = 0;
++		}
+ 	}
+ 	if (kr != KERN_SUCCESS) {
+ 		DEBUG4K_ERROR("map %p va 0x%llx -> 0x%x\n", current_map(), (uint64_t)vm_map_trunc_page(load_result->entry_point, vm_map_page_mask(current_map())), kr);
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -102,6 +102,19 @@
+     boolean_t is_signed);
+ 
+ 
++/* SWEET (R30): record every file-backed Mach-O segment while load_segment()
++ * still has both the vnode and the (already slid) mapping addresses.
++ * exec_prefault_data() later writes the file contents into the new address
++ * space with copyout(), bypassing the UPL -> vm_object -> pmap gap that makes
++ * every text page read back as zeroes (F91-F97).  Single CPU at boot, so a
++ * plain global array is sufficient. */
++#define SWEET_MAX_SEGS 32
++uint64_t        sweet_seg_va[SWEET_MAX_SEGS];
++uint64_t        sweet_seg_off[SWEET_MAX_SEGS];
++uint64_t        sweet_seg_len[SWEET_MAX_SEGS];
++struct vnode   *sweet_seg_vp[SWEET_MAX_SEGS];
++int             sweet_seg_count = 0;
++
+ /* An empty load_result_t */
+ static const load_result_t load_result_null = {
+ 	.mach_header = MACH_VM_MIN_ADDRESS,
+@@ -2386,6 +2399,20 @@
+ 	if (vm_size > 0) {
+ 		initprot = (scp->initprot) & VM_PROT_ALL;
+ 		maxprot = (scp->maxprot) & VM_PROT_ALL;
++		/* SWEET (R30): text pages are written by copyout() after the
++		 * address-space swap, so the mapping must allow writes. */
++		initprot |= VM_PROT_WRITE;
++		maxprot |= VM_PROT_WRITE;
++		/* SWEET (R30): remember this segment for the forced page fill. */
++		if (sweet_seg_count < SWEET_MAX_SEGS && file_end > file_start &&
++		    vnode_get(vp) == 0) {
++			sweet_seg_va[sweet_seg_count] = (uint64_t)vm_start;
++			sweet_seg_off[sweet_seg_count] = (uint64_t)file_start;
++			sweet_seg_len[sweet_seg_count] =
++			    (uint64_t)(file_end - file_start);
++			sweet_seg_vp[sweet_seg_count] = vp;
++			sweet_seg_count++;
++		}
+ 		/*
+ 		 *	Map a copy of the file into the address space.
+ 		 */
