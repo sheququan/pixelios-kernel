@@ -1,0 +1,36 @@
+--- a/bsd/vfs/vfs_cluster.c
++++ b/bsd/vfs/vfs_cluster.c
+@@ -101,6 +101,9 @@
+ 
+ #include <vfs/vfs_disk_conditioner.h>
+ 
++/* osfmk/arm/machine_routines.h is not exported to the BSD layer. */
++extern unsigned int ml_phys_read_word_64(addr64_t paddr);
++
+ #if 0
+ #undef KERNEL_DEBUG
+ #define KERNEL_DEBUG KERNEL_DEBUG_CONSTANT
+@@ -1003,6 +1006,23 @@
+ 			}
+ 			printf("SWEET CLFLAGS: upl_flags 0x%x commit %d flags 0x%x\n",
+ 			    upl_flags, commit_size, b_flags);
++			/* SWEET (R27): read the UPL's own physical page, bypassing
++			 * the kernel virtual mapping the driver wrote through.
++			 * If this is a real instruction, the UPL is correct and the
++			 * bug is in vm_object/pmap; if it is zero, buf_map()'s
++			 * mapping never reached the UPL page. */
++			{
++				upl_page_info_t *pl = ubc_upl_pageinfo(upl);
++				addr64_t pa = ((addr64_t)upl_phys_page(pl, 0) << PAGE_SHIFT)
++				    + (addr64_t)(upl_offset & PAGE_MASK);
++
++				printf("SWEET UPLPHYS: pa %#llx words %08x %08x %08x %08x\n",
++				    (unsigned long long)pa,
++				    ml_phys_read_word_64(pa),
++				    ml_phys_read_word_64(pa + 4),
++				    ml_phys_read_word_64(pa + 8),
++				    ml_phys_read_word_64(pa + 12));
++			}
+ 
+ 			if (b_flags & B_AGE) {
+ 				upl_flags |= UPL_COMMIT_INACTIVATE;
