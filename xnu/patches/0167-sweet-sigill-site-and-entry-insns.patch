@@ -1,0 +1,74 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -640,7 +640,7 @@
+ 	 * jump into unmapped or zeroed memory (IABORT/DABORT or pc outside).
+ 	 */
+ 	if (is_user) {
+-		printf("SWEET EXC: thread %d pc %#llx esr %#x ec %u far %#llx\n",
++		kprintf("SWEET EXC: thread %d pc %#llx esr %#x ec %u far %#llx\n",
+ 		    thread_tid(current_thread()),
+ 		    (unsigned long long)get_saved_state_pc(state), esr,
+ 		    (unsigned)class, (unsigned long long)far);
+@@ -771,9 +771,9 @@
+ 		if (is_user) {
+ 			uint32_t instr = 0;
+ 			COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+-			printf("SWEET SIGILL: pc %#llx instr %08x esr %#x far %#llx\n",
++			panic("SWEET SIGILL: pc %#llx instr %08x esr %#x ec %u far %#llx",
+ 			    (unsigned long long)get_saved_state_pc(state), instr, esr,
+-			    (unsigned long long)far);
++			    (unsigned)class, (unsigned long long)far);
+ 		}
+ 
+ 		handle_uncategorized(&context->ss);
+@@ -1749,11 +1749,10 @@
+ 	 * an MSR/MRS trap to a system register this port does not emulate is
+ 	 * one too. Print the PC and the instruction so the launchd SIGILL can
+ 	 * be attributed. */
+-	printf("SWEET MSR: pc %#llx esr %#x\n",
+-	    (unsigned long long)get_saved_state_pc(state), esr);
+-
+ 	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+ 	codes[1] = instr;
++	panic("SWEET MSR: pc %#llx instr %08x esr %#x",
++	    (unsigned long long)get_saved_state_pc(state), instr, esr);
+ 
+ 	exception_triage(exception, codes, numcodes);
+ 	__builtin_unreachable();
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7745,6 +7745,21 @@
+ 	 */
+ 	printf("SWEET EXEC: %s entry %#llx prefault %d\n",
+ 	    imgp->ip_vp->v_name, (unsigned long long)load_result->entry_point, kr);
++	/*
++	 * SWEET (R21): launchd gets a SIGILL within a few instructions of its
++	 * entry point. Reading the entry instructions back through the user
++	 * mapping settles it in one boot: four zero words are the zero page
++	 * (udf #0 -> ESR_EC_UNCATEGORIZED -> SIGILL), while real opcodes mean
++	 * the fault is elsewhere and the exception panic below will name it.
++	 */
++	{
++		uint32_t insn[4] = { 0, 0, 0, 0 };
++		int cierr = copyin((user_addr_t)load_result->entry_point,
++		    (char *)insn, sizeof(insn));
++
++		printf("SWEET EXEC: %s insns %08x %08x %08x %08x (copyin %d)\n",
++		    imgp->ip_vp->v_name, insn[0], insn[1], insn[2], insn[3], cierr);
++	}
+ 	if (kr != KERN_SUCCESS) {
+ 		DEBUG4K_ERROR("map %p va 0x%llx -> 0x%x\n", current_map(), (uint64_t)vm_map_trunc_page(load_result->entry_point, vm_map_page_mask(current_map())), kr);
+ 	}
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -3514,6 +3514,10 @@
+ 		error = vn_rdwr(UIO_READ, vp, (caddr_t)addr + done, chunk, at,
+ 		    UIO_SYSSPACE, IO_NOCACHE, kauth_cred_get(), &part_resid,
+ 		    current_proc());
++		/* SWEET (R21): name the exact chunk that came back empty. */
++		printf("SWEET SIGRD: %s done %u chunk %u at %lld err %d resid %d "
++		    "first %08x\n", vp->v_name, done, chunk, (long long)at,
++		    error, part_resid, *(const uint32_t *)(uintptr_t)(addr + done));
+ 		if (error == 0 && part_resid != 0) {
+ 			error = EIO;
+ 			resid = part_resid;
