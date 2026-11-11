@@ -35,7 +35,7 @@
 +			    vfs_context_proc(imgp->ip_vfs_context));
 +			pa = kvtophys((vm_offset_t)pmap_page);
 +			pn = (ppnum_t)(pa >> PAGE_SHIFT);
-+			pkr = pmap_enter(vm_map_pmap(current_map()),
++			pkr = pmap_enter(get_task_pmap(current_task()),
 +			    (vm_map_address_t)page, pn,
 +			    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
 +			    VM_PROT_READ, 0, TRUE);
