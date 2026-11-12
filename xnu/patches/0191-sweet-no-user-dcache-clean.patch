@@ -1,0 +1,103 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7808,8 +7808,7 @@
+ 			extern off_t ubc_getsize(struct vnode *);
+ 			static char sweet_page[PAGE_SIZE];
+ 			uint64_t written_va[128];
+-			size_t written_len[128];
+-			int si, filled = 0, rd_bad = 0, co_bad = 0, wn = 0, wi;
++			int si, filled = 0, rd_bad = 0, co_bad = 0, wn = 0;
+ 
+ 			for (si = 0; si < sweet_seg_count && si < 32; si++) {
+ 				struct vnode *svp = sweet_seg_vp[si];
+@@ -7878,35 +7877,27 @@
+ 						co_bad++;
+ 					}
+ 					if (wn < 128) {
+-						written_va[wn] = va + pos;
+-						written_len[wn] = n;
+-						wn++;
++						written_va[wn++] = va + pos;
+ 					}
+ 					filled++;
+ 					pos += n;
+ 				}
+ 				/* keep the iocount: the pmap_enter pass reuses sweet_seg_vp[] */
+ 			}
+-			/* R43: copyout() stores land in the D-cache, and the CPU
+-			 * fetches instructions through the I-cache.  Clean every
+-			 * byte we wrote to the PoC, invalidate all I-caches and
+-			 * flush the TLBs before anything tries to execute them.
+-			 * R42 proved this exact sequence makes copyin() see the
+-			 * real entry opcodes; apply it to all 91 blocks. */
+-			for (wi = 0; wi < wn; wi++) {
+-				uintptr_t fa, end;
+-				end = (uintptr_t)written_va[wi] + written_len[wi];
+-				for (fa = (uintptr_t)written_va[wi]; fa < end; fa += 64) {
+-					__asm__ volatile("dc civac, %0" :: "r"(fa) : "memory");
+-				}
+-			}
++			/* R44: R43 died here with "Kernel data abort" in
++			 * exec_prefault_data (+1468), Far 0x1081c5e408,
++			 * esr 0x9600014b: dc civac applied directly to a USER
++			 * VA hits a PTE whose access flag is still clear.  R42's
++			 * clean worked because it used a KERNEL VA.  Do not clean
++			 * user VAs; R42 may have been fixed by the TLB flush
++			 * alone.  Keep the I-cache invalidation and barriers. */
+ 			__asm__ volatile("dsb sy" ::: "memory");
+ 			__asm__ volatile("ic ialluis" ::: "memory");
+ 			__asm__ volatile("dsb sy" ::: "memory");
+ 			__asm__ volatile("tlbi vmalle1is" ::: "memory");
+ 			__asm__ volatile("dsb sy" ::: "memory");
+ 			__asm__ volatile("isb" ::: "memory");
+-			printf("SWEET CACHEFIX: pages %d cleaned\n", wn);
++			printf("SWEET CACHEFIX: pages %d icache+tlb (no user dcache)\n", wn);
+ 			{
+ 				uint32_t chk[4] = { 0, 0, 0, 0 };
+ 				int ck = copyin((user_addr_t)load_result->entry_point,
+@@ -7949,7 +7940,6 @@
+ 			extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ 			extern uint64_t pmap_find_pa(pmap_t, addr64_t);
+ 			extern uint64_t get_mmu_ttb(void);
+-			extern unsigned int ml_phys_read_word_64(uint64_t);
+ 			extern uint64_t sweet_seg_va[], sweet_seg_off[], sweet_seg_len[];
+ 			extern struct vnode *sweet_seg_vp[];
+ 			extern int sweet_seg_count;
+@@ -7975,7 +7965,7 @@
+ 			ppnum_t pn, pp_after;
+ 			kern_return_t pkr;
+ 			uint32_t chk2[4] = { 0, 0, 0, 0 }, src[4] = { 0, 0, 0, 0 };
+-			uint32_t chk3[4] = { 0, 0, 0, 0 }, physw[2] = { 0, 0 };
++			uint32_t chk3[4] = { 0, 0, 0, 0 };
+ 			uint64_t ttb0 = 0, ttb1 = 0, cur_pa = 0, tgt_pa = 0;
+ 			int rd, resid = 0, ci2, ci3, si, seg = -1, berr = -1, bi;
+ 			daddr64_t bpn = 0, sub_bpns[4] = { 0, 0, 0, 0 };
+@@ -8086,21 +8076,17 @@
+ 			__asm__ volatile("isb" ::: "memory");
+ 			cur_pa = pmap_find_pa(cur_pmap, (addr64_t)entry);
+ 			tgt_pa = pmap_find_pa(tgt_pmap, (addr64_t)entry);
+-			/* R43: physical RAM here reaches 0x8_8xxx_xxxx (> 4 GiB),
+-			 * so R42's 4 GiB guard skipped both reads.  Keep the
+-			 * guard only against the R30 sentinel address. */
+-			if (pa > 0 && pa < 0x10000000000ULL) {
+-				physw[0] = ml_phys_read_word_64(pa + (entry - page));
+-			}
+-			if (tgt_pa > 0 && tgt_pa < 0x10000000000ULL) {
+-				physw[1] = ml_phys_read_word_64(tgt_pa);
+-			}
++			/* R44: do not call ml_phys_read_word_64() here.  R30 already
++			 * showed it can data-abort on a copy-window VA when the
++			 * physical address is outside the direct map.  The PTE
++			 * addresses themselves are the useful evidence now. */
+ 			printf("SWEET TTB: b %#llx a %#llx pa %#llx cur %#llx tgt %#llx\n",
+ 			    (unsigned long long)ttb0, (unsigned long long)ttb1,
+ 			    (unsigned long long)pa, (unsigned long long)cur_pa,
+ 			    (unsigned long long)tgt_pa);
+-			printf("SWEET PHYS: ours %08x pte %08x src %08x %08x\n",
+-			    physw[0], physw[1], src[0], src[1]);
++			printf("SWEET PHYS: pa %#llx cur %#llx tgt %#llx src %08x %08x\n",
++			    (unsigned long long)pa, (unsigned long long)cur_pa,
++			    (unsigned long long)tgt_pa, src[0], src[1]);
+ 			ci2 = copyin(entry, (char *)chk2, sizeof(chk2));
+ 			ci3 = copyin(page, (char *)chk3, sizeof(chk3));
+ 			printf("SWEET TLBFIX: ci %d pg %d insns %08x %08x %08x %08x pgw %08x %08x %08x %08x\n",
