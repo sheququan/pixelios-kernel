@@ -1,0 +1,55 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1524,6 +1524,7 @@
+ 		char sweet_trbuf[640];
+ 		char sweet_arg[48];
+ 		uint64_t sweet_tbl[4] = { 0, 0, 0, 0 };
++		uint64_t sweet_dump[8] = { 0 };
+ 		uint64_t sweet_idx = 0;
+ 		extern void sweet_tr_format(char *, unsigned long);
+ 
+@@ -1548,11 +1549,32 @@
+ 		 */
+ 		sweet_idx = saved_state64(state)->x[23];
+ 		sweet_tbl[0] = saved_state64(state)->x[24];
++		/*
++		 * SWEET (R58): read the eight table entries at the base the loader
++		 * used, but only after a range check -- R56 taught us that copyin()
++		 * of an unchecked register-derived address aborts the kernel when it
++		 * lands outside the user range (F126).  Everything below 2^47 is a
++		 * user VA on this port.
++		 */
++		if (sweet_tbl[0] < 0x0000800000000000ULL) {
++			uint64_t ent[8] = { 0 };
++
++			COPYIN(sweet_tbl[0], ent, sizeof(ent));
++			sweet_dump[0] = ent[0];
++			sweet_dump[1] = ent[1];
++			sweet_dump[2] = ent[2];
++			sweet_dump[3] = ent[3];
++			sweet_dump[4] = ent[4];
++			sweet_dump[5] = ent[5];
++			sweet_dump[6] = ent[6];
++			sweet_dump[7] = ent[7];
++		}
+ 		/* Formatted here (no console I/O) and printed by panic(), which
+ 		 * is allowed in this context; see F86. */
+ 		sweet_tr_format(sweet_trbuf, sizeof(sweet_trbuf));
+ 		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx x0 %#llx x1 %#llx arg '%s'\n"
+-		    "SWEET TBL: tbl %#llx idx %#llx\n%s",
++		    "SWEET TBL: tbl %#llx idx %#llx\n"
++		    "SWEET ENT: %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n%s",
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
+@@ -1560,6 +1582,10 @@
+ 		    (unsigned long long)saved_state64(state)->x[1],
+ 		    sweet_arg,
+ 		    (unsigned long long)sweet_tbl[0], (unsigned long long)sweet_idx,
++		    (unsigned long long)sweet_dump[0], (unsigned long long)sweet_dump[1],
++		    (unsigned long long)sweet_dump[2], (unsigned long long)sweet_dump[3],
++		    (unsigned long long)sweet_dump[4], (unsigned long long)sweet_dump[5],
++		    (unsigned long long)sweet_dump[6], (unsigned long long)sweet_dump[7],
+ 		    sweet_trbuf);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
