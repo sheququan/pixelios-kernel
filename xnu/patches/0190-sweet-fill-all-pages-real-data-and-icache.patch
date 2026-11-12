@@ -1,0 +1,165 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7724,6 +7724,11 @@
+ 	int ret;
+ 	size_t expected_all_image_infos_size;
+ 	kern_return_t kr;
++	/* SWEET (R43): the forced-fill loop below reads file data straight
++	 * from the UFS device instead of through the broken UPL path. */
++	extern errno_t VNOP_BLOCKMAP(vnode_t, off_t, size_t,
++	    daddr64_t *, size_t *, void *, int, vfs_context_t);
++	extern int sweet_ufs_read_at(daddr64_t, uint32_t, void *);
+ 
+ 	/*
+ 	 * Prefault executable or dyld entry point.
+@@ -7802,7 +7807,9 @@
+ 			extern int sweet_seg_count;
+ 			extern off_t ubc_getsize(struct vnode *);
+ 			static char sweet_page[PAGE_SIZE];
+-			int si, filled = 0, rd_bad = 0, co_bad = 0;
++			uint64_t written_va[128];
++			size_t written_len[128];
++			int si, filled = 0, rd_bad = 0, co_bad = 0, wn = 0, wi;
+ 
+ 			for (si = 0; si < sweet_seg_count && si < 32; si++) {
+ 				struct vnode *svp = sweet_seg_vp[si];
+@@ -7826,35 +7833,80 @@
+ 				while (pos < left) {
+ 					size_t n = (size_t)(PAGE_SIZE -
+ 					    ((va + pos) & (uint64_t)(PAGE_SIZE - 1)));
+-					int resid = 0, rerr, cerr;
++					int rerr, cerr;
+ 
+ 					if (n > left - pos) {
+ 						n = (size_t)(left - pos);
+ 					}
+ 					memset(sweet_page, 0, PAGE_SIZE);
+-					rerr = vn_rdwr(UIO_READ, svp, sweet_page,
+-					    (int)n, (off_t)(off + pos),
+-					    UIO_SYSSPACE, 0,
+-					    vfs_context_ucred(imgp->ip_vfs_context),
+-					    &resid,
+-					    vfs_context_proc(imgp->ip_vfs_context));
++					/* R43: vn_rdwr() goes through the UPL ->
++					 * vm_object path that never delivers data on
++					 * SWEET.  Read this 16 KiB page as four
++					 * 4 KiB HFS extents straight from the UFS
++					 * device, exactly like R38 did for the
++					 * entry page. */
++					rerr = 0;
++					{
++						int bi, nb = (int)((n + PAGE_SIZE / 4 - 1) /
++						    (PAGE_SIZE / 4));
++						for (bi = 0; bi < nb && bi < 4; bi++) {
++							daddr64_t sub_bpn = 0;
++							size_t sub_run = 0;
++							int se = VNOP_BLOCKMAP(svp,
++							    (off_t)(off + pos) +
++							    bi * (PAGE_SIZE / 4),
++							    PAGE_SIZE / 4, &sub_bpn,
++							    &sub_run, NULL, VNODE_READ,
++							    imgp->ip_vfs_context);
++							if (se || sub_bpn < 0) {
++								rerr = EINVAL;
++								break;
++							}
++							rerr |= sweet_ufs_read_at(sub_bpn,
++							    (uint32_t)(PAGE_SIZE / 4),
++							    sweet_page +
++							    bi * (PAGE_SIZE / 4));
++						}
++					}
+ 					if (rerr) {
+ 						rd_bad++;
+ 						break;
+ 					}
+-					if (resid > 0 && resid <= (int)n) {
+-						n -= (size_t)resid;
+-					}
+ 					cerr = copyout(sweet_page,
+ 					    (user_addr_t)(va + pos), (vm_size_t)n);
+ 					if (cerr) {
+ 						co_bad++;
+ 					}
++					if (wn < 128) {
++						written_va[wn] = va + pos;
++						written_len[wn] = n;
++						wn++;
++					}
+ 					filled++;
+ 					pos += n;
+ 				}
+ 				/* keep the iocount: the pmap_enter pass reuses sweet_seg_vp[] */
+ 			}
++			/* R43: copyout() stores land in the D-cache, and the CPU
++			 * fetches instructions through the I-cache.  Clean every
++			 * byte we wrote to the PoC, invalidate all I-caches and
++			 * flush the TLBs before anything tries to execute them.
++			 * R42 proved this exact sequence makes copyin() see the
++			 * real entry opcodes; apply it to all 91 blocks. */
++			for (wi = 0; wi < wn; wi++) {
++				uintptr_t fa, end;
++				end = (uintptr_t)written_va[wi] + written_len[wi];
++				for (fa = (uintptr_t)written_va[wi]; fa < end; fa += 64) {
++					__asm__ volatile("dc civac, %0" :: "r"(fa) : "memory");
++				}
++			}
++			__asm__ volatile("dsb sy" ::: "memory");
++			__asm__ volatile("ic ialluis" ::: "memory");
++			__asm__ volatile("dsb sy" ::: "memory");
++			__asm__ volatile("tlbi vmalle1is" ::: "memory");
++			__asm__ volatile("dsb sy" ::: "memory");
++			__asm__ volatile("isb" ::: "memory");
++			printf("SWEET CACHEFIX: pages %d cleaned\n", wn);
+ 			{
+ 				uint32_t chk[4] = { 0, 0, 0, 0 };
+ 				int ck = copyin((user_addr_t)load_result->entry_point,
+@@ -7864,6 +7916,23 @@
+ 				    sweet_seg_count, filled, rd_bad, co_bad,
+ 				    chk[0], chk[1], chk[2], chk[3], ck);
+ 			}
++			/* R43: sample two of the filled pages to confirm real data
++			 * survives outside the single entry page R42 wired. */
++			{
++				uint32_t sa[4] = { 0, 0, 0, 0 }, sb[4] = { 0, 0, 0, 0 };
++				int ea = 0, eb = 0;
++				if (sweet_seg_count > 0) {
++					ea = copyin((user_addr_t)sweet_seg_va[0],
++					    (char *)sa, sizeof(sa));
++				}
++				if (wn > 8) {
++					eb = copyin((user_addr_t)written_va[wn / 2],
++					    (char *)sb, sizeof(sb));
++				}
++				printf("SWEET SEGREAD: ea %d w %08x %08x %08x %08x eb %d w %08x %08x %08x %08x\n",
++				    ea, sa[0], sa[1], sa[2], sa[3],
++				    eb, sb[0], sb[1], sb[2], sb[3]);
++			}
+ 			/* keep the segment table: the pmap_enter pass below needs it */
+ 		}
+ 		/* SWEET (R32/R33): R31 wrote all 91 page blocks with copyout() without
+@@ -7977,6 +8046,8 @@
+ 					__asm__ volatile("dc civac, %0" :: "r"(ca) : "memory");
+ 				}
+ 				__asm__ volatile("dsb sy" ::: "memory");
++				__asm__ volatile("ic ialluis" ::: "memory");
++				__asm__ volatile("dsb sy" ::: "memory");
+ 			}
+ 			pa = kvtophys((vm_offset_t)pmap_page);
+ 			pn = (ppnum_t)(pa >> PAGE_SHIFT);
+@@ -8015,10 +8086,13 @@
+ 			__asm__ volatile("isb" ::: "memory");
+ 			cur_pa = pmap_find_pa(cur_pmap, (addr64_t)entry);
+ 			tgt_pa = pmap_find_pa(tgt_pmap, (addr64_t)entry);
+-			if (pa > 0 && pa < 0x100000000ULL) {
++			/* R43: physical RAM here reaches 0x8_8xxx_xxxx (> 4 GiB),
++			 * so R42's 4 GiB guard skipped both reads.  Keep the
++			 * guard only against the R30 sentinel address. */
++			if (pa > 0 && pa < 0x10000000000ULL) {
+ 				physw[0] = ml_phys_read_word_64(pa + (entry - page));
+ 			}
+-			if (tgt_pa > 0 && tgt_pa < 0x100000000ULL) {
++			if (tgt_pa > 0 && tgt_pa < 0x10000000000ULL) {
+ 				physw[1] = ml_phys_read_word_64(tgt_pa);
+ 			}
+ 			printf("SWEET TTB: b %#llx a %#llx pa %#llx cur %#llx tgt %#llx\n",
