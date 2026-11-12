@@ -1,0 +1,69 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -692,6 +692,22 @@
+ 		error = EIO;
+ 		goto done;
+ 	}
++	/*
++	 * SWEET (R45): print the physical page the driver is about to fill.
++	 * ubc_upl_map() mapped the UPL into the kernel map and the driver's
++	 * stores go into that mapping; the UPL's own page list (printed as
++	 * "SWEET COMMITPAGE" by upl_commit_range()) must name the very same
++	 * physical page, otherwise the data never reaches the vm_object and
++	 * every file read returns zeroes.
++	 */
++	{
++		extern unsigned long long kvtophys(unsigned long long);
++		unsigned long long vpa = kvtophys((unsigned long long)(uintptr_t)vaddr);
++
++		printf("SWEET UPLMAP: vaddr %#llx vpa %#llx blkno %llu count %u\n",
++		    (unsigned long long)(uintptr_t)vaddr, vpa,
++		    (unsigned long long)buf_blkno(bp), (unsigned)buf_count(bp));
++	}
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	for (uint32_t done = 0; done < count;) {
+--- a/osfmk/vm/vm_pageout.c
++++ b/osfmk/vm/vm_pageout.c
+@@ -7698,6 +7698,41 @@
+ 	} else {
+ 		shadow_object = object;
+ 	}
++
++	/*
++	 * SWEET (R45): dump the UPL's own state at commit time.  The UFS
++	 * driver fills the pages that ubc_upl_map() mapped into the kernel
++	 * (the address the driver prints as "SWEET BUFMAP: vaddr"); the
++	 * physical page numbers recorded in the UPL's page list are what
++	 * has to reach the vm_object.  If the list is empty, or points at
++	 * pages other than the ones the driver wrote, every file read
++	 * returns zeroes even though the device delivered real data.
++	 */
++	if (upl->u_size >= 16384) {
++		int ci;
++
++		printf("SWEET COMMIT: upl %p object %p shadow %p uflags %#x "
++		    "uoff %#llx usz %#llx kaddr %#llx mapped %#llx "
++		    "off %#llx size %d flags %#x\n",
++		    (void *)upl, (void *)object, (void *)shadow_object,
++		    (unsigned)upl->flags,
++		    (unsigned long long)upl->u_offset,
++		    (unsigned long long)upl->u_size,
++		    (unsigned long long)upl->kaddr,
++		    (unsigned long long)upl->u_mapped_size,
++		    (unsigned long long)offset, (int)size, (unsigned)flags);
++		if (page_list) {
++			for (ci = 0; ci < 4 && ci < (int)count; ci++) {
++				printf("SWEET COMMITPAGE: %d pn %#x pa %#llx "
++				    "present %d dirty %d\n",
++				    ci, (unsigned)upl_phys_page(page_list, ci),
++				    (unsigned long long)
++				    ((uint64_t)upl_phys_page(page_list, ci) << PAGE_SHIFT),
++				    (int)upl_page_present(page_list, ci),
++				    (int)upl_dirty_page(page_list, ci));
++			}
++		}
++	}
+ 	entry = offset / PAGE_SIZE;
+ 	target_offset = (vm_object_offset_t)offset;
+ 
