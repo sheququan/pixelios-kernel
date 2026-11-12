@@ -1,0 +1,89 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7878,6 +7878,9 @@
+ 			    ppnum_t, vm_prot_t, vm_prot_t, unsigned int, boolean_t);
+ 			extern uint64_t kvtophys(vm_offset_t);
+ 			extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
++			extern uint64_t pmap_find_pa(pmap_t, addr64_t);
++			extern uint64_t get_mmu_ttb(void);
++			extern unsigned int ml_phys_read_word_64(uint64_t);
+ 			extern uint64_t sweet_seg_va[], sweet_seg_off[], sweet_seg_len[];
+ 			extern struct vnode *sweet_seg_vp[];
+ 			extern int sweet_seg_count;
+@@ -7903,7 +7906,9 @@
+ 			ppnum_t pn, pp_after;
+ 			kern_return_t pkr;
+ 			uint32_t chk2[4] = { 0, 0, 0, 0 }, src[4] = { 0, 0, 0, 0 };
+-			int rd, resid = 0, ci2, si, seg = -1, berr = -1, bi;
++			uint32_t chk3[4] = { 0, 0, 0, 0 }, physw[2] = { 0, 0 };
++			uint64_t ttb0 = 0, ttb1 = 0, cur_pa = 0, tgt_pa = 0;
++			int rd, resid = 0, ci2, ci3, si, seg = -1, berr = -1, bi;
+ 			daddr64_t bpn = 0, sub_bpns[4] = { 0, 0, 0, 0 };
+ 			size_t run = 0;
+ 			/* R39: exec can target a task other than current_task()
+@@ -7962,6 +7967,17 @@
+ 				    pmap_page + bi * (PAGE_SIZE / 4));
+ 			}
+ 			memcpy(src, pmap_page + (entry - page), sizeof(src));
++			/* R42: the direct block read wrote through the kernel D-cache.
++			 * If the user PTE uses different cache attributes, the CPU
++			 * would still see stale zeroes in DRAM.  Clean to the PoC. */
++			{
++				uintptr_t ca;
++				for (ca = (uintptr_t)pmap_page;
++				    ca < (uintptr_t)pmap_page + PAGE_SIZE; ca += 64) {
++					__asm__ volatile("dc civac, %0" :: "r"(ca) : "memory");
++				}
++				__asm__ volatile("dsb sy" ::: "memory");
++			}
+ 			pa = kvtophys((vm_offset_t)pmap_page);
+ 			pn = (ppnum_t)(pa >> PAGE_SHIFT);
+ 			pkr = pmap_enter(tgt_pmap,
+@@ -7983,19 +7999,39 @@
+ 				    (unsigned)pmap_find_phys(tgt_pmap, (addr64_t)page));
+ 			}
+ 			pp_after = pmap_find_phys(tgt_pmap, (addr64_t)page);
+-			/* R41: R40 wired the real physical page into BOTH the current
+-			 * and the target pmap (cur_pp == tgt_pp == pn, both kr 0),
+-			 * yet copyin() and the CPU still read zeroes.  The only
+-			 * remaining explanation is that TTBR0 still points at a
+-			 * third (pre-exec) pmap.  Switch the hardware page table
+-			 * explicitly before reading the entry back. */
++			/* R42: R40 proved cur_pp == tgt_pp == pn and R41 proved that
++			 * pmap_switch(tgt_pmap) still leaves copyin() reading zeroes.
++			 * Two causes remain: a stale TLB entry tagged with the active
++			 * ASID, and a data cache that never reached the PoC.  Do both
++			 * explicitly and print the hardware roots to tell them apart. */
++			ttb0 = get_mmu_ttb();
+ 			{
+ 				extern void pmap_switch(pmap_t);
+ 				pmap_switch(tgt_pmap);
+-				printf("SWEET PMAPSW: switched to tgt %p\n",
+-				    (void *)tgt_pmap);
+ 			}
++			ttb1 = get_mmu_ttb();
++			__asm__ volatile("tlbi vmalle1is" ::: "memory");
++			__asm__ volatile("dsb sy" ::: "memory");
++			__asm__ volatile("isb" ::: "memory");
++			cur_pa = pmap_find_pa(cur_pmap, (addr64_t)entry);
++			tgt_pa = pmap_find_pa(tgt_pmap, (addr64_t)entry);
++			if (pa > 0 && pa < 0x100000000ULL) {
++				physw[0] = ml_phys_read_word_64(pa + (entry - page));
++			}
++			if (tgt_pa > 0 && tgt_pa < 0x100000000ULL) {
++				physw[1] = ml_phys_read_word_64(tgt_pa);
++			}
++			printf("SWEET TTB: b %#llx a %#llx pa %#llx cur %#llx tgt %#llx\n",
++			    (unsigned long long)ttb0, (unsigned long long)ttb1,
++			    (unsigned long long)pa, (unsigned long long)cur_pa,
++			    (unsigned long long)tgt_pa);
++			printf("SWEET PHYS: ours %08x pte %08x src %08x %08x\n",
++			    physw[0], physw[1], src[0], src[1]);
+ 			ci2 = copyin(entry, (char *)chk2, sizeof(chk2));
++			ci3 = copyin(page, (char *)chk3, sizeof(chk3));
++			printf("SWEET TLBFIX: ci %d pg %d insns %08x %08x %08x %08x pgw %08x %08x %08x %08x\n",
++			    ci2, ci3, chk2[0], chk2[1], chk2[2], chk2[3],
++			    chk3[0], chk3[1], chk3[2], chk3[3]);
+ 			printf("SWEET PMAPFILL: seg %d vp %p cur %p tgt %p va %#llx foff %#llx bpn %lld bpns %lld %lld %lld %lld berr %d run %lu pa %#llx pn 0x%x kr %d rd %d resid %d pp 0x%x src %08x %08x %08x %08x insns %08x %08x %08x %08x (copyin %d)\n",
+ 			    seg, (void *)evp, (void *)cur_pmap, (void *)tgt_pmap,
+ 			    (unsigned long long)page,
