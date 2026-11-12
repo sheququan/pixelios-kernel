@@ -1,0 +1,90 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7805,6 +7805,7 @@
+ 			extern uint64_t sweet_seg_va[], sweet_seg_off[], sweet_seg_len[];
+ 			extern struct vnode *sweet_seg_vp[];
+ 			extern int sweet_seg_count;
++			extern uint64_t sweet_fill_dbg[8];
+ 			extern off_t ubc_getsize(struct vnode *);
+ 			static char sweet_page[PAGE_SIZE];
+ 			uint64_t written_va[128];
+@@ -7929,6 +7930,34 @@
+ 			__asm__ volatile("dsb sy" ::: "memory");
+ 			__asm__ volatile("isb" ::: "memory");
+ 			printf("SWEET CACHEFIX: pages %d icache+tlb (no user dcache)\n", wn);
++			/* SWEET (R63): remember what the fill actually covered, plus
++			 * the first word of dyld's __DATA_CONST (file 0x80000) after
++			 * the fill, so the fault panic can show whether that page was
++			 * ever written with real data. */
++			sweet_fill_dbg[0] = (uint64_t)sweet_seg_count;
++			sweet_fill_dbg[1] = (uint64_t)filled;
++			sweet_fill_dbg[2] = (uint64_t)rd_bad;
++			sweet_fill_dbg[3] = (uint64_t)co_bad;
++			sweet_fill_dbg[4] = 0;
++			sweet_fill_dbg[5] = 0;
++			sweet_fill_dbg[6] = 0;
++			{
++				int q;
++				for (q = 0; q < sweet_seg_count && q < 32; q++) {
++					if (sweet_seg_off[q] == 0x80000) {
++						uint32_t dw[2] = { 0, 0 };
++
++						(void)copyin((user_addr_t)(sweet_seg_va[q] + 0x1000),
++						    (char *)dw, sizeof(dw));
++						sweet_fill_dbg[4] = sweet_seg_va[q];
++						sweet_fill_dbg[5] = sweet_seg_len[q];
++						sweet_fill_dbg[6] = (uint64_t)dw[0] |
++						    ((uint64_t)dw[1] << 32);
++						sweet_fill_dbg[7] = 1;
++						break;
++					}
++				}
++			}
+ 			{
+ 				uint32_t chk[4] = { 0, 0, 0, 0 };
+ 				int ck = copyin((user_addr_t)load_result->entry_point,
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -112,6 +112,7 @@
+ uint64_t        sweet_seg_va[SWEET_MAX_SEGS];
+ uint64_t        sweet_seg_off[SWEET_MAX_SEGS];
+ uint64_t        sweet_seg_len[SWEET_MAX_SEGS];
++uint64_t        sweet_fill_dbg[8];
+ struct vnode   *sweet_seg_vp[SWEET_MAX_SEGS];
+ int             sweet_seg_count = 0;
+ 
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1526,6 +1526,7 @@
+ 		uint64_t sweet_tbl[4] = { 0, 0, 0, 0 };
+ 		uint64_t sweet_dump[8] = { 0 };
+ 		uint64_t sweet_idx = 0;
++		extern uint64_t sweet_fill_dbg[8];
+ 		extern void sweet_tr_format(char *, unsigned long);
+ 
+ 		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
+@@ -1574,7 +1575,8 @@
+ 		sweet_tr_format(sweet_trbuf, sizeof(sweet_trbuf));
+ 		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx x0 %#llx x1 %#llx arg '%s'\n"
+ 		    "SWEET TBL: tbl %#llx idx %#llx\n"
+-		    "SWEET ENT: %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n%s",
++		    "SWEET ENT: %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n"
++		    "SWEET FILL2: segs %llu blk %llu rdb %llu cob %llu va %#llx len %#llx w %08x f %llu\n%s",
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
+@@ -1586,6 +1588,14 @@
+ 		    (unsigned long long)sweet_dump[2], (unsigned long long)sweet_dump[3],
+ 		    (unsigned long long)sweet_dump[4], (unsigned long long)sweet_dump[5],
+ 		    (unsigned long long)sweet_dump[6], (unsigned long long)sweet_dump[7],
++		    (unsigned long long)sweet_fill_dbg[0],
++		    (unsigned long long)sweet_fill_dbg[1],
++		    (unsigned long long)sweet_fill_dbg[2],
++		    (unsigned long long)sweet_fill_dbg[3],
++		    (unsigned long long)sweet_fill_dbg[4],
++		    (unsigned long long)sweet_fill_dbg[5],
++		    (unsigned int)sweet_fill_dbg[6],
++		    (unsigned long long)sweet_fill_dbg[7],
+ 		    sweet_trbuf);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
