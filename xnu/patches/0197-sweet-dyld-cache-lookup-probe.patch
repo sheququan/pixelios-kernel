@@ -1,0 +1,167 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -25,6 +25,11 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <kern/debug.h>
+ #include <libkern/libkern.h>
++#include <sys/namei.h>
++
++/* SWEET (R49/R50): flight recorder, defined at the bottom of this file. */
++void sweet_tr_pagein(uint64_t, uint64_t);
++void sweet_tr_event(uint32_t, uint64_t, uint64_t);
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
+ #include <mach/kern_return.h>
+@@ -521,8 +526,91 @@
+ 	return copyout(&flags, a.out_flags, sizeof(flags));
+ }
+ 
++/*
++ * SWEET (R50): is dyld even looking for the shared cache?
++ *
++ * R49 proved the shared cache is never paged in (the largest file ever
++ * page-in'd is dyld itself, 0xe1520).  dyld therefore decided the cache was
++ * unusable before reading it.  These two probes separate the three possible
++ * reasons without guessing:
++ *   lookup probe fires, open probe fires  -> the file was found and opened,
++ *                                            so dyld read it and gave up later
++ *   only the lookup probe fires           -> name resolution failed (missing
++ *                                            file / permissions / VFS error)
++ *   neither probe fires                   -> dyld never even tried, the
++ *                                            decision is elsewhere
++ */
++static int sweet_dylldcache_lookup_seen;
++static int sweet_dyldcache_open_seen;
++
++static int
++sweet_name_has(const char *name, unsigned int len, const char *tag)
++{
++	unsigned int taglen = (unsigned int)strlen(tag);
++	unsigned int i;
++
++	if (len < taglen) {
++		return 0;
++	}
++	for (i = 0; i + taglen <= len; i++) {
++		if (memcmp(name + i, tag, taglen) == 0) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
++static int
++sweet_vnode_check_lookup(kauth_cred_t cred, struct vnode *dvp,
++    struct label *dlabel, struct componentname *cnp)
++{
++	(void)cred;
++	(void)dlabel;
++	if (!sweet_dylldcache_lookup_seen && cnp->cn_namelen > 4) {
++		const char *n = cnp->cn_nameptr;
++		unsigned int len = (unsigned int)cnp->cn_namelen;
++
++		if (sweet_name_has(n, len, "com.apple.dyld") ||
++		    sweet_name_has(n, len, "dyld_shared_cache")) {
++			char buf[64];
++			unsigned int copy = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
++
++			memcpy(buf, n, copy);
++			buf[copy] = 0;
++			sweet_dylldcache_lookup_seen = 1;
++			printf("SWEET DYLD: lookup '%s' in '%s'\n", buf,
++			    dvp->v_name ? dvp->v_name : "?");
++			sweet_tr_event(2, len, 0);
++		}
++	}
++	return 0;
++}
++
++static int
++sweet_vnode_check_open(kauth_cred_t cred, struct vnode *vp,
++    struct label *label, int acc_mode)
++{
++	(void)cred;
++	(void)label;
++	if (!sweet_dyldcache_open_seen && vp->v_name != NULL) {
++		size_t len = strlen(vp->v_name);
++
++		if (sweet_name_has(vp->v_name, (unsigned int)len, "dyld_shared_cache")) {
++			extern off_t ubc_getsize(struct vnode *);
++
++			sweet_dyldcache_open_seen = 1;
++			printf("SWEET DYLD: open '%s' acc %#x size %#llx\n",
++			    vp->v_name, acc_mode, (unsigned long long)ubc_getsize(vp));
++			sweet_tr_event(3, (uint64_t)ubc_getsize(vp), (uint64_t)acc_mode);
++		}
++	}
++	return 0;
++}
++
+ static const struct mac_policy_ops sweet_dyld_amfi_ops = {
+ 	.mpo_policy_syscall = sweet_dyld_amfi_syscall,
++	.mpo_vnode_check_lookup = sweet_vnode_check_lookup,
++	.mpo_vnode_check_open = sweet_vnode_check_open,
+ };
+ 
+ static struct mac_policy_conf sweet_dyld_amfi_conf = {
+@@ -584,6 +672,17 @@
+ 	}
+ }
+ 
++/* Generic marker in the same ring (tag 2/3 used by the dyld probes). */
++void
++sweet_tr_event(uint32_t tag, uint64_t a, uint64_t b)
++{
++	struct sweet_tr_ent *e = &sweet_tr_ring[sweet_tr_head % SWEET_TR_MAX];
++
++	e->a = ((uint64_t)tag << 56) | (a & 0x00ffffffffffffffULL);
++	e->b = b;
++	sweet_tr_head++;
++}
++
+ /* Render the summary into a buffer; never touches the console itself. */
+ void
+ sweet_tr_format(char *out, unsigned long outlen)
+@@ -595,7 +694,7 @@
+ 	    "SWEET TRMAX: filesize %#llx at off %#llx pageins %u\n",
+ 	    (unsigned long long)sweet_tr_max_fs,
+ 	    (unsigned long long)sweet_tr_max_off, sweet_tr_head);
+-	for (i = 0; i < n && i < 8 && off + 64 < outlen; i++) {
++	for (i = 0; i < n && i < 4 && off + 64 < outlen; i++) {
+ 		unsigned int idx = (sweet_tr_head - 1 - i) % SWEET_TR_MAX;
+ 
+ 		off += snprintf(out + off, outlen - off,
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1522,18 +1522,29 @@
+ 	{
+ 		uint32_t sweet_instr = 0;
+ 		char sweet_trbuf[640];
++		char sweet_arg[48];
+ 		extern void sweet_tr_format(char *, unsigned long);
+ 
+ 		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
+ 		    sizeof(sweet_instr));
++		/*
++		 * SWEET (R50): the last crash was a strcmp(x20, -1) inside dyld,
++		 * so the interesting value is the string in x20 -- it names what
++		 * dyld was looking for.  Read it with copyin (safe here) and NUL
++		 * terminate unconditionally.
++		 */
++		sweet_arg[0] = 0;
++		COPYIN(state->x[20], sweet_arg, sizeof(sweet_arg) - 1);
++		sweet_arg[sizeof(sweet_arg) - 1] = 0;
+ 		/* Formatted here (no console I/O) and printed by panic(), which
+ 		 * is allowed in this context; see F86. */
+ 		sweet_tr_format(sweet_trbuf, sizeof(sweet_trbuf));
+-		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx\n%s",
++		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx x0 %#llx x1 %#llx arg '%s'\n%s",
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
+-		    sweet_trbuf);
++		    (unsigned long long)state->x[0], (unsigned long long)state->x[1],
++		    sweet_arg, sweet_trbuf);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
+ 	__builtin_unreachable();
