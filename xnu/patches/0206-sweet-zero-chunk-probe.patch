@@ -1,0 +1,61 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7865,20 +7865,20 @@
+ 							    (uint32_t)(PAGE_SIZE / 4),
+ 							    sweet_page +
+ 							    bi * (PAGE_SIZE / 4));
+-							/* SWEET (R60): dyld's __DATA_CONST starts at
+-							 * file offset 0x80000 and its second 4 KiB
+-							 * block reads back as zeroes at fixup time
+-							 * (F127).  Show what the driver handed us for
+-							 * each chunk of that segment. */
+-							if (off == 0x80000 && pos < 0x4000 &&
+-							    svp->v_name != NULL &&
+-							    strcmp(svp->v_name, "dyld") == 0) {
++							/* SWEET (R61): only shout about chunks that
++							 * came back as pure zeroes -- F127 says one
++							 * 4 KiB block of dyld's __DATA_CONST does,
++							 * and a silent zero read is the whole bug. */
++							{
+ 								uint32_t *w = (uint32_t *)(void *)
+ 								    (sweet_page + bi * (PAGE_SIZE / 4));
+ 
+-								printf("SWEET FDBG: pos %#llx bi %d blk %#llx w %08x %08x\n",
+-								    (unsigned long long)pos, bi,
+-								    (unsigned long long)sub_bpn, w[0], w[1]);
++								if (w[0] == 0 && w[1] == 0) {
++									printf("SWEET ZCHUNK: off %#llx pos %#llx bi %d blk %#llx\n",
++									    (unsigned long long)off,
++									    (unsigned long long)pos, bi,
++									    (unsigned long long)sub_bpn);
++								}
+ 							}
+ 						}
+ 					}
+@@ -7891,15 +7891,21 @@
+ 					if (cerr) {
+ 						co_bad++;
+ 					}
+-					if (off == 0x80000 && pos < 0x4000 &&
+-					    svp->v_name != NULL &&
+-					    strcmp(svp->v_name, "dyld") == 0) {
++					{
+ 						uint32_t g[2] = { 0, 0 };
++						uint32_t *w = (uint32_t *)(void *)sweet_page;
+ 
+ 						(void)copyin((user_addr_t)(va + pos),
+ 						    (char *)g, sizeof(g));
+-						printf("SWEET FDBG2: va %#llx w %08x %08x cerr %d\n",
+-						    (unsigned long long)(va + pos), g[0], g[1], cerr);
++						/* buffer had data but the user VA reads
++						 * back zeroes: the loss is in copyout/pmap */
++						if (g[0] == 0 && g[1] == 0 &&
++						    (w[0] != 0 || w[1] != 0)) {
++							printf("SWEET ZVA: off %#llx va %#llx buf %08x %08x cerr %d\n",
++							    (unsigned long long)off,
++							    (unsigned long long)(va + pos),
++							    w[0], w[1], cerr);
++						}
+ 					}
+ 					if (wn < 128) {
+ 						written_va[wn++] = va + pos;
