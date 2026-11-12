@@ -1,0 +1,20 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -746,6 +746,17 @@
+ 	sweet_pf_last_off = f_offset;
+ 	sweet_pf_after++;
+ 	sweet_tr_event(5, filesize, f_offset);
++	/*
++	 * SWEET (R71): cluster_pagein() runs in a normal thread context, where
++	 * printf() is legal -- unlike the panic paths (F86) whose output keeps
++	 * being lost to the reset.  Say it here, while the page is actually
++	 * being replaced, so the console scroll holds the answer.
++	 */
++	if (sweet_pf_after <= 16) {
++		printf("SWEET ZPAGE: n %u fs %#llx off %#llx\n",
++		    sweet_pf_after, (unsigned long long)filesize,
++		    (unsigned long long)f_offset);
++	}
+ }
+ 
+ void
