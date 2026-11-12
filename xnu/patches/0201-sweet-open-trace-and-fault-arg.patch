@@ -1,0 +1,65 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1522,18 +1522,30 @@
+ 	{
+ 		uint32_t sweet_instr = 0;
+ 		char sweet_trbuf[640];
++		char sweet_arg[48];
+ 		extern void sweet_tr_format(char *, unsigned long);
+ 
+ 		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
+ 		    sizeof(sweet_instr));
++		/*
++		 * SWEET (R50): the last crash was a strcmp(x20, -1) inside dyld,
++		 * so the interesting value is the string in x20 -- it names what
++		 * dyld was looking for.  Read it with copyin (safe here) and NUL
++		 * terminate unconditionally.
++		 */
++		sweet_arg[0] = 0;
++		COPYIN(saved_state64(state)->x[20], sweet_arg, sizeof(sweet_arg) - 1);
++		sweet_arg[sizeof(sweet_arg) - 1] = 0;
+ 		/* Formatted here (no console I/O) and printed by panic(), which
+ 		 * is allowed in this context; see F86. */
+ 		sweet_tr_format(sweet_trbuf, sizeof(sweet_trbuf));
+-		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx\n%s",
++		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx x0 %#llx x1 %#llx arg '%s'\n%s",
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
+-		    sweet_trbuf);
++		    (unsigned long long)saved_state64(state)->x[0],
++		    (unsigned long long)saved_state64(state)->x[1],
++		    sweet_arg, sweet_trbuf);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
+ 	__builtin_unreachable();
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -591,12 +591,27 @@
+ 	return 0;
+ }
+ 
++static int sweet_open_trace_n;
++
+ static int
+ sweet_vnode_check_open(kauth_cred_t cred, struct vnode *vp,
+     struct label *label, int acc_mode)
+ {
+ 	(void)cred;
+ 	(void)label;
++	if (vp != NULL && sweet_open_trace_n < 12) {
++		const char *on = vnode_getname(vp);
++
++		if (on != NULL) {
++			sweet_open_trace_n++;
++			/* SWEET (R55): the first dozen opens of the first
++			 * userspace process.  If the dyld cache path never shows
++			 * up here, dyld is not even asking for it. */
++			printf("SWEET OPEN %d: '%s' acc %#x\n",
++			    sweet_open_trace_n, on, acc_mode);
++			vnode_putname(on);
++		}
++	}
+ 	if (!sweet_dyldcache_open_seen && vp != NULL) {
+ 		const char *n = vnode_getname(vp);
+ 
