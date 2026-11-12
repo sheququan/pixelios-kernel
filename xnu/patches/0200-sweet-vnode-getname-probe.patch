@@ -1,0 +1,53 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -40,7 +40,7 @@
+ #include <sys/proc.h>
+ #include <sys/systm.h>
+ #include <sys/ubc_internal.h>
+-#include <sys/vnode_internal.h>
++#include <sys/vnode.h>
+ #include <security/mac_policy.h>
+ 
+ /* iokit/Kernel/arm/SweetEntitlements.cpp */
+@@ -577,9 +577,14 @@
+ 
+ 			memcpy(buf, n, copy);
+ 			buf[copy] = 0;
++			const char *dn = dvp ? vnode_getname(dvp) : NULL;
++
+ 			sweet_dylldcache_lookup_seen = 1;
+ 			printf("SWEET DYLD: lookup '%s' in '%s'\n", buf,
+-			    dvp->v_name ? dvp->v_name : "?");
++			    dn ? dn : "?");
++			if (dn) {
++				vnode_putname(dn);
++			}
+ 			sweet_tr_event(2, len, 0);
+ 		}
+ 	}
+@@ -592,17 +597,21 @@
+ {
+ 	(void)cred;
+ 	(void)label;
+-	if (!sweet_dyldcache_open_seen && vp->v_name != NULL) {
+-		size_t len = strlen(vp->v_name);
++	if (!sweet_dyldcache_open_seen && vp != NULL) {
++		const char *n = vnode_getname(vp);
+ 
+-		if (sweet_name_has(vp->v_name, (unsigned int)len, "dyld_shared_cache")) {
++		if (n != NULL &&
++		    sweet_name_has(n, (unsigned int)strlen(n), "dyld_shared_cache")) {
+ 			extern off_t ubc_getsize(struct vnode *);
+ 
+ 			sweet_dyldcache_open_seen = 1;
+ 			printf("SWEET DYLD: open '%s' acc %#x size %#llx\n",
+-			    vp->v_name, acc_mode, (unsigned long long)ubc_getsize(vp));
++			    n, acc_mode, (unsigned long long)ubc_getsize(vp));
+ 			sweet_tr_event(3, (uint64_t)ubc_getsize(vp), (uint64_t)acc_mode);
+ 		}
++		if (n != NULL) {
++			vnode_putname(n);
++		}
+ 	}
+ 	return 0;
+ }
