@@ -1,0 +1,51 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1539,38 +1539,27 @@
+ 		COPYIN(saved_state64(state)->x[20], sweet_arg, sizeof(sweet_arg) - 1);
+ 		sweet_arg[sizeof(sweet_arg) - 1] = 0;
+ 		/*
+-		 * SWEET (R56): x23 walks the table at x24 in 8-byte steps and the
+-		 * entry it landed on is the NULL.  Print the index and the four
+-		 * entries around it: pointers dyld rebased at runtime look like
+-		 * 0x00000100xxxxxxxx, untouched chained fixups look like
+-		 * 0x0100000000xxxxxx, so their shape says who filled the table.
++		 * SWEET (R57): only read the loop offset out of x23.  R56 tried to
++		 * copyin the neighbouring table entries and turned the probe into a
++		 * kernel data abort (F126): x24+x23 is attacker/loader-controlled
++		 * and copyin() has no working recovery inside the exception path.
++		 * The caller's table base and the index are enough -- the file's
++		 * static contents are known offline.
+ 		 */
+-		{
+-			uint64_t nbr[4] = { 0, 0, 0, 0 };
+-			uint64_t tbl = saved_state64(state)->x[24];
+-			uint64_t idx = saved_state64(state)->x[23];
+-
+-			COPYIN(tbl + idx - 8, nbr, sizeof(nbr));
+-			sweet_tbl[0] = nbr[0];
+-			sweet_tbl[1] = nbr[1];
+-			sweet_tbl[2] = nbr[2];
+-			sweet_tbl[3] = nbr[3];
+-			sweet_idx = idx;
+-		}
++		sweet_idx = saved_state64(state)->x[23];
++		sweet_tbl[0] = saved_state64(state)->x[24];
+ 		/* Formatted here (no console I/O) and printed by panic(), which
+ 		 * is allowed in this context; see F86. */
+ 		sweet_tr_format(sweet_trbuf, sizeof(sweet_trbuf));
+ 		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx x0 %#llx x1 %#llx arg '%s'\n"
+-		    "SWEET TBL: idx %#llx [%#llx %#llx %#llx %#llx]\n%s",
++		    "SWEET TBL: tbl %#llx idx %#llx\n%s",
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
+ 		    (unsigned long long)saved_state64(state)->x[0],
+ 		    (unsigned long long)saved_state64(state)->x[1],
+ 		    sweet_arg,
+-		    (unsigned long long)sweet_idx,
+-		    (unsigned long long)sweet_tbl[0], (unsigned long long)sweet_tbl[1],
+-		    (unsigned long long)sweet_tbl[2], (unsigned long long)sweet_tbl[3],
++		    (unsigned long long)sweet_tbl[0], (unsigned long long)sweet_idx,
+ 		    sweet_trbuf);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
