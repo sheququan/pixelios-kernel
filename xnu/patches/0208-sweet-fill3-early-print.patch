@@ -1,0 +1,60 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7967,6 +7967,57 @@
+ 				    sweet_seg_count, filled, rd_bad, co_bad,
+ 				    chk[0], chk[1], chk[2], chk[3], ck);
+ 			}
++			/*
++			 * SWEET (R66): say it now, not at the fault.
++			 *
++			 * F127: dyld's chained-pointer table at file 0x80fe0 reads
++			 * back as zeros from the 5th entry on, i.e. everything from
++			 * file 0x81000 -- the second 4 KiB block of __DATA_CONST.
++			 * The panic that reports it happens four minutes later and
++			 * the panel is reset before the camera sees it, so print
++			 * while the process image is still in front of us: the first
++			 * word of the first four 4 KiB chunks of the segment that
++			 * starts at file 0x80000.  Chunk 0 is known-good
++			 * (0x0100000007xxxxxx in the file), so if chunk 0 shows a
++			 * value and chunk 1 shows zero, the fill handed us the right
++			 * bytes for the segment and the loss is downstream.
++			 */
++			{
++				int q2;
++				int hit = 0;
++
++				for (q2 = 0; q2 < sweet_seg_count && q2 < 32; q2++) {
++					uint32_t w[4] = { 0, 0, 0, 0 };
++					int i2;
++
++					if (sweet_seg_off[q2] != 0x80000) {
++						continue;
++					}
++					hit = 1;
++					for (i2 = 0; i2 < 4; i2++) {
++						uint32_t one = 0;
++
++						if (0x1000 * (uint64_t)i2 >=
++						    sweet_seg_len[q2]) {
++							break;
++						}
++						(void)copyin((user_addr_t)
++						    (sweet_seg_va[q2] +
++						    0x1000 * (uint64_t)i2),
++						    (char *)&one, sizeof(one));
++						w[i2] = one;
++					}
++					printf("SWEET FILL3: off %#llx va %#llx len %#llx w %08x %08x %08x %08x\n",
++					    (unsigned long long)sweet_seg_off[q2],
++					    (unsigned long long)sweet_seg_va[q2],
++					    (unsigned long long)sweet_seg_len[q2],
++					    w[0], w[1], w[2], w[3]);
++				}
++				if (!hit) {
++					printf("SWEET FILL3: no segment with file offset 0x80000 (segs %d)\n",
++					    sweet_seg_count);
++				}
++			}
+ 			/* R43: sample two of the filled pages to confirm real data
+ 			 * survives outside the single entry page R42 wired. */
+ 			{
