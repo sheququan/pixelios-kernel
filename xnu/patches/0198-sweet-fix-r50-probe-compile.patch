@@ -1,0 +1,31 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -26,6 +26,7 @@
+ #include <kern/debug.h>
+ #include <libkern/libkern.h>
+ #include <sys/namei.h>
++#include <sys/vnode.h>
+ 
+ /* SWEET (R49/R50): flight recorder, defined at the bottom of this file. */
+ void sweet_tr_pagein(uint64_t, uint64_t);
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1534,7 +1534,7 @@
+ 		 * terminate unconditionally.
+ 		 */
+ 		sweet_arg[0] = 0;
+-		COPYIN(state->x[20], sweet_arg, sizeof(sweet_arg) - 1);
++		COPYIN(saved_state64(state)->x[20], sweet_arg, sizeof(sweet_arg) - 1);
+ 		sweet_arg[sizeof(sweet_arg) - 1] = 0;
+ 		/* Formatted here (no console I/O) and printed by panic(), which
+ 		 * is allowed in this context; see F86. */
+@@ -1543,7 +1543,8 @@
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
+-		    (unsigned long long)state->x[0], (unsigned long long)state->x[1],
++		    (unsigned long long)saved_state64(state)->x[0],
++		    (unsigned long long)saved_state64(state)->x[1],
+ 		    sweet_arg, sweet_trbuf);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
