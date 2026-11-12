@@ -1,0 +1,118 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -661,6 +661,11 @@
+ #define SWEET_RC_N 128
+ static char sweet_rc_data[SWEET_RC_N][PAGE_SIZE];
+ static uint64_t sweet_rc_blkno[SWEET_RC_N];
++/* SWEET (R67): how much of that block the entry holds.  The strategy path
++ * records one PAGE_SIZE-sized window per buffer, but the fill loop asks for
++ * 4 KiB chunks one at a time; without the length every chunk except the very
++ * first looked like a miss (F127: the table dies exactly at 0x81000). */
++static uint32_t sweet_rc_len[SWEET_RC_N];
+ static int sweet_rc_n;
+ 
+ static void
+@@ -792,8 +797,8 @@
+ 		int ri = sweet_rc_n % SWEET_RC_N;
+ 
+ 		sweet_rc_blkno[ri] = (uint64_t)buf_blkno(bp);
+-		memcpy(sweet_rc_data[ri], vaddr,
+-		    MIN(count, (uint32_t)PAGE_SIZE));
++		sweet_rc_len[ri] = MIN(count, (uint32_t)PAGE_SIZE);
++		memcpy(sweet_rc_data[ri], vaddr, sweet_rc_len[ri]);
+ 		sweet_rc_n++;
+ 	}
+ 	buf_unmap(bp);
+@@ -820,6 +825,7 @@
+ sweet_ufs_read_at(daddr64_t blkno, uint32_t bytes, void *dst)
+ {
+ 	uint32_t units[2], want;
++	const char *zeroptr;
+ 	int ui, i, error = EINVAL, hit = -1;
+ 
+ 	if (dst == NULL || bytes == 0 || blkno < 0 || !su.nblocks) {
+@@ -827,12 +833,48 @@
+ 	}
+ 	want = MIN(bytes, (uint32_t)PAGE_SIZE);
+ 
+-	/* 1. the bytes the strategy path already copied into its UPL. */
++	/* 1. the bytes the strategy path already copied into its UPL.
++	 *
++	 * SWEET (R67): an entry covers a window, not a single block.  The page-in
++	 * of dyld's __DATA_CONST reads 32 KiB starting at file 0x80000 and the
++	 * recorder keeps the first PAGE_SIZE (16 KiB) of it; asking for the
++	 * 4 KiB chunk at 0x81000 used to be a miss even though those bytes are
++	 * sitting in sweet_rc_data[] -- the fill then fell through to the
++	 * direct READ(10) path and the whole table after 0x81000 came out zero.
++	 * Treat the entry as [blkno, blkno + len/unit) and accept any offset
++	 * inside it.  Both units are tried because buf_blkno() may be 512-byte
++	 * sectors or 4 KiB blocks; the range check is what picks the right one.
++	 */
++	units[0] = su.secsize ? su.secsize : DEV_BSIZE;
++	units[1] = UFS_BLOCK;
+ 	for (i = 0; i < sweet_rc_n && i < SWEET_RC_N; i++) {
+-		if (sweet_rc_blkno[i] == (uint64_t)blkno) {
+-			memcpy(dst, sweet_rc_data[i], want);
+-			printf("SWEET UFSREAD: cache hit bpn %lld n %d\n",
+-			    (long long)blkno, sweet_rc_n);
++		uint64_t base = sweet_rc_blkno[i];
++		uint32_t len = sweet_rc_len[i];
++
++		if (len < want || blkno < base) {
++			continue;
++		}
++		for (ui = 0; ui < 2; ui++) {
++			uint64_t delta = (uint64_t)blkno - base;
++			const char *src;
++			uint32_t w0;
++
++			if (delta * units[ui] + want > (uint64_t)len) {
++				continue;
++			}
++			src = sweet_rc_data[i] + delta * units[ui];
++			memcpy(&w0, src, sizeof(w0));
++			if (w0 == 0 && len > want && delta == 0) {
++				/* A leading all-zero window is suspicious but
++				 * legal; only reject it when the entry could
++				 * hold more data than we are reading. */
++				continue;
++			}
++			memcpy(dst, src, want);
++			printf("SWEET UFSREAD: cache hit bpn %lld off %llu unit %u n %d\n",
++			    (long long)blkno,
++			    (unsigned long long)(delta * units[ui]), units[ui],
++			    sweet_rc_n);
+ 			return 0;
+ 		}
+ 	}
+@@ -842,9 +884,9 @@
+ 
+ 	/* 2. direct READ(10); print the bounce words and try both block units
+ 	 * (512-byte sectors and 4 KiB allocation blocks) in case HFS's
+-	 * VNOP_BLOCKMAP() returns one or the other. */
+-	units[0] = su.secsize ? su.secsize : DEV_BSIZE;
+-	units[1] = UFS_BLOCK;
++	 * VNOP_BLOCKMAP() returns one or the other.  units[] was filled in
++	 * above. */
++	zeroptr = NULL;
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	for (ui = 0; ui < 2; ui++) {
+ 		uint64_t pos = (uint64_t)blkno * units[ui];
+@@ -873,6 +915,17 @@
+ 			hit = ui;
+ 			break;
+ 		}
++		if (zeroptr == NULL) {
++			zeroptr = src;
++		}
++	}
++	if (hit < 0 && zeroptr != NULL) {
++		/* SWEET (R67): a block that really is all zeroes is not a failed
++		 * read.  The old heuristic confused the two and returned EINVAL
++		 * without copying anything, so the fill loop saw rd_bad, stopped
++		 * the segment early and left real data as zeroes (F127). */
++		memcpy(dst, zeroptr, want);
++		hit = 0;
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+ 	printf("SWEET UFSREAD: chosen %d err %d\n", hit, error);
