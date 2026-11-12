@@ -1,0 +1,38 @@
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2728,12 +2728,21 @@
+ 	proc_fdunlock(p);
+ 
+ 	/*
++	 * SWEET (R48): entry marker.  dyld only reaches this syscall when it
++	 * decided the shared region is empty and the shared cache therefore has
++	 * to be mapped; without this line a missing "SWEET SRMAP" cannot be told
++	 * apart from "the syscall failed before the success print".
++	 */
++	printf("SWEET SRMAP: enter files %u mappings %u\n", files_count, mappings_count);
++
++	/*
+ 	 * Turn files, mappings into sr_file_mappings and other setup.
+ 	 */
+ 	error = shared_region_map_and_slide_setup(p, files_count,
+ 	    files, mappings_count, mappings,
+ 	    &sr_file_mappings, &shared_region, rdir_vp);
+ 	if (error != 0) {
++		printf("SWEET SRMAP: setup err %d files %u\n", error, files_count);
+ 		vnode_put(rdir_vp);
+ 		return error;
+ 	}
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1524,8 +1524,9 @@
+ 
+ 		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
+ 		    sizeof(sweet_instr));
+-		panic("SWEET UFAULT: pc %#llx instr %08x esr %#x code %#llx far %#llx",
+-		    (unsigned long long)get_saved_state_pc(state), sweet_instr, esr,
++		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx",
++		    (unsigned long long)get_saved_state_pc(state),
++		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
