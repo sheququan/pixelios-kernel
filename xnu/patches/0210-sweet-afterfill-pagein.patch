@@ -1,0 +1,121 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -30,6 +30,9 @@
+ /* SWEET (R49/R50): flight recorder, defined at the bottom of this file. */
+ void sweet_tr_pagein(uint64_t, uint64_t);
+ void sweet_tr_event(uint32_t, uint64_t, uint64_t);
++void sweet_tr_fill_done(void);
++void sweet_tr_pagein_after(uint64_t, uint64_t);
++void sweet_tr_after_format(char *, unsigned long);
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
+ #include <mach/kern_return.h>
+@@ -707,6 +710,56 @@
+ 	sweet_tr_head++;
+ }
+ 
++/*
++ * SWEET (R70): page-ins that happen *after* the forced fill.
++ *
++ * R66/R67 fixed the fill (F130) and launchd got further: it now dies with
++ * SIGILL on dyld __TEXT+0x13c00, an instruction word of 00000000 -- i.e. a
++ * page that the fill had written came back as zeroes.  The only thing that can
++ * do that is the normal pager touching the page afterwards, so count and keep
++ * the first/last of those page-ins.  The panic prints this without any console
++ * I/O of its own.
++ */
++static int sweet_fill_done;
++static unsigned int sweet_pf_after;
++static uint64_t sweet_pf_first_fs, sweet_pf_first_off;
++static uint64_t sweet_pf_last_fs, sweet_pf_last_off;
++
++void
++sweet_tr_fill_done(void)
++{
++	sweet_fill_done = 1;
++	sweet_tr_event(4, 0, 0);
++}
++
++void
++sweet_tr_pagein_after(uint64_t filesize, uint64_t f_offset)
++{
++	if (!sweet_fill_done) {
++		return;
++	}
++	if (sweet_pf_after == 0) {
++		sweet_pf_first_fs = filesize;
++		sweet_pf_first_off = f_offset;
++	}
++	sweet_pf_last_fs = filesize;
++	sweet_pf_last_off = f_offset;
++	sweet_pf_after++;
++	sweet_tr_event(5, filesize, f_offset);
++}
++
++void
++sweet_tr_after_format(char *out, unsigned long outlen)
++{
++	snprintf(out, outlen,
++	    "SWEET ZPAGE: afterfill %u first fs %#llx off %#llx last fs %#llx off %#llx\n",
++	    sweet_pf_after,
++	    (unsigned long long)sweet_pf_first_fs,
++	    (unsigned long long)sweet_pf_first_off,
++	    (unsigned long long)sweet_pf_last_fs,
++	    (unsigned long long)sweet_pf_last_off);
++}
++
+ /* Render the summary into a buffer; never touches the console itself. */
+ void
+ sweet_tr_format(char *out, unsigned long outlen)
+--- a/bsd/vfs/vfs_cluster.c
++++ b/bsd/vfs/vfs_cluster.c
+@@ -2379,8 +2379,11 @@
+ 	 * and where in it we are, so the fault path can say afterwards whether
+ 	 * the shared cache was ever touched. */
+ 	extern void sweet_tr_pagein(uint64_t, uint64_t);
++	extern void sweet_tr_pagein_after(uint64_t, uint64_t);
+ 
+ 	sweet_tr_pagein((uint64_t)filesize, (uint64_t)f_offset);
++	/* SWEET (R70): was this page touched again after the forced fill? */
++	sweet_tr_pagein_after((uint64_t)filesize, (uint64_t)f_offset);
+ 	return cluster_pagein_ext(vp, upl, upl_offset, f_offset, size, filesize, flags, NULL, NULL);
+ }
+ 
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8018,6 +8018,12 @@
+ 					    sweet_seg_count);
+ 				}
+ 			}
++			{
++				/* SWEET (R70): from here on, count page-ins. */
++				extern void sweet_tr_fill_done(void);
++
++				sweet_tr_fill_done();
++			}
+ 			/* R43: sample two of the filled pages to confirm real data
+ 			 * survives outside the single entry page R42 wired. */
+ 			{
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -770,10 +770,18 @@
+ 		 */
+ 		if (is_user) {
+ 			uint32_t instr = 0;
++			char sweet_zpage[192];
++			extern void sweet_tr_after_format(char *, unsigned long);
++
+ 			COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+-			panic("SWEET SIGILL: pc %#llx instr %08x esr %#x ec %u far %#llx",
++			/* SWEET (R70): an all-zero instruction word means the page
++			 * was handed to us as zeroes; say whether the pager touched
++			 * it after the forced fill.  Formatted, not printed: see
++			 * F86 for why printf() is not usable here. */
++			sweet_tr_after_format(sweet_zpage, sizeof(sweet_zpage));
++			panic("SWEET SIGILL: pc %#llx instr %08x esr %#x ec %u far %#llx\n%s",
+ 			    (unsigned long long)get_saved_state_pc(state), instr, esr,
+-			    (unsigned)class, (unsigned long long)far);
++			    (unsigned)class, (unsigned long long)far, sweet_zpage);
+ 		}
+ 
+ 		handle_uncategorized(&context->ss);
