@@ -1,0 +1,41 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7865,6 +7865,21 @@
+ 							    (uint32_t)(PAGE_SIZE / 4),
+ 							    sweet_page +
+ 							    bi * (PAGE_SIZE / 4));
++							/* SWEET (R60): dyld's __DATA_CONST starts at
++							 * file offset 0x80000 and its second 4 KiB
++							 * block reads back as zeroes at fixup time
++							 * (F127).  Show what the driver handed us for
++							 * each chunk of that segment. */
++							if (off == 0x80000 && pos < 0x4000 &&
++							    svp->v_name != NULL &&
++							    strcmp(svp->v_name, "dyld") == 0) {
++								uint32_t *w = (uint32_t *)(void *)
++								    (sweet_page + bi * (PAGE_SIZE / 4));
++
++								printf("SWEET FDBG: pos %#llx bi %d blk %#llx w %08x %08x\n",
++								    (unsigned long long)pos, bi,
++								    (unsigned long long)sub_bpn, w[0], w[1]);
++							}
+ 						}
+ 					}
+ 					if (rerr) {
+@@ -7876,6 +7891,16 @@
+ 					if (cerr) {
+ 						co_bad++;
+ 					}
++					if (off == 0x80000 && pos < 0x4000 &&
++					    svp->v_name != NULL &&
++					    strcmp(svp->v_name, "dyld") == 0) {
++						uint32_t g[2] = { 0, 0 };
++
++						(void)copyin((user_addr_t)(va + pos),
++						    (char *)g, sizeof(g));
++						printf("SWEET FDBG2: va %#llx w %08x %08x cerr %d\n",
++						    (unsigned long long)(va + pos), g[0], g[1], cerr);
++					}
+ 					if (wn < 128) {
+ 						written_va[wn++] = va + pos;
+ 					}
