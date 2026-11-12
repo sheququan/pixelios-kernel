@@ -1,0 +1,111 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -24,6 +24,7 @@
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <kern/debug.h>
++#include <libkern/libkern.h>
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
+ #include <mach/kern_return.h>
+@@ -547,4 +548,61 @@
+ 	error = mac_policy_register(&sweet_dyld_amfi_conf, &sweet_dyld_amfi_handle, NULL);
+ 	printf("SWEET AMFI: dyld policy \"AMFI\" %s (%d)\n", error ? "NOT registered" : "registered", error);
+ }
++/*
++ * SWEET (R49): a small flight recorder.
++ *
++ * The console only keeps the last screenful, and by the time a userspace
++ * process dies the interesting part (which file was being paged in, and how
++ * big it was) has scrolled away.  Record the (filesize, offset) of recent
++ * cluster page-ins in a ring so the fault path can print a summary inside
++ * its panic message -- panic() may use the console from a disabled-interrupt
++ * context, plain printf() may not (see the serial_console assert in F86).
++ */
++#define SWEET_TR_MAX 32
++
++struct sweet_tr_ent {
++	uint64_t	a;
++	uint64_t	b;
++};
++
++static struct sweet_tr_ent sweet_tr_ring[SWEET_TR_MAX];
++static unsigned int sweet_tr_head;
++static uint64_t sweet_tr_max_fs;
++static uint64_t sweet_tr_max_off;
++
++void
++sweet_tr_pagein(uint64_t filesize, uint64_t f_offset)
++{
++	struct sweet_tr_ent *e = &sweet_tr_ring[sweet_tr_head % SWEET_TR_MAX];
++
++	e->a = filesize;
++	e->b = f_offset;
++	sweet_tr_head++;
++	if (filesize > sweet_tr_max_fs) {
++		sweet_tr_max_fs = filesize;
++		sweet_tr_max_off = f_offset;
++	}
++}
++
++/* Render the summary into a buffer; never touches the console itself. */
++void
++sweet_tr_format(char *out, unsigned long outlen)
++{
++	unsigned int i, n, off = 0;
++
++	n = sweet_tr_head < SWEET_TR_MAX ? sweet_tr_head : SWEET_TR_MAX;
++	off += snprintf(out + off, outlen - off,
++	    "SWEET TRMAX: filesize %#llx at off %#llx pageins %u\n",
++	    (unsigned long long)sweet_tr_max_fs,
++	    (unsigned long long)sweet_tr_max_off, sweet_tr_head);
++	for (i = 0; i < n && i < 8 && off + 64 < outlen; i++) {
++		unsigned int idx = (sweet_tr_head - 1 - i) % SWEET_TR_MAX;
++
++		off += snprintf(out + off, outlen - off,
++		    "SWEET TR%d: fs %#llx off %#llx\n", i,
++		    (unsigned long long)sweet_tr_ring[idx].a,
++		    (unsigned long long)sweet_tr_ring[idx].b);
++	}
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/vfs/vfs_cluster.c
++++ b/bsd/vfs/vfs_cluster.c
+@@ -2375,6 +2375,12 @@
+ cluster_pagein(vnode_t vp, upl_t upl, upl_offset_t upl_offset, off_t f_offset,
+     int size, off_t filesize, int flags)
+ {
++	/* SWEET (R49): remember which file this page-in belongs to (by size)
++	 * and where in it we are, so the fault path can say afterwards whether
++	 * the shared cache was ever touched. */
++	extern void sweet_tr_pagein(uint64_t, uint64_t);
++
++	sweet_tr_pagein((uint64_t)filesize, (uint64_t)f_offset);
+ 	return cluster_pagein_ext(vp, upl, upl_offset, f_offset, size, filesize, flags, NULL, NULL);
+ }
+ 
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1521,13 +1521,19 @@
+ 	 */
+ 	{
+ 		uint32_t sweet_instr = 0;
++		char sweet_trbuf[640];
++		extern void sweet_tr_format(char *, unsigned long);
+ 
+ 		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
+ 		    sizeof(sweet_instr));
+-		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx",
++		/* Formatted here (no console I/O) and printed by panic(), which
++		 * is allowed in this context; see F86. */
++		sweet_tr_format(sweet_trbuf, sizeof(sweet_trbuf));
++		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx\n%s",
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+-		    (unsigned long long)codes[0], (unsigned long long)fault_addr);
++		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
++		    sweet_trbuf);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
+ 	__builtin_unreachable();
