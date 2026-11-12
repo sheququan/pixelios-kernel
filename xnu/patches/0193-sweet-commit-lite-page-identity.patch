@@ -1,0 +1,82 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -692,22 +692,6 @@
+ 		error = EIO;
+ 		goto done;
+ 	}
+-	/*
+-	 * SWEET (R45): print the physical page the driver is about to fill.
+-	 * ubc_upl_map() mapped the UPL into the kernel map and the driver's
+-	 * stores go into that mapping; the UPL's own page list (printed as
+-	 * "SWEET COMMITPAGE" by upl_commit_range()) must name the very same
+-	 * physical page, otherwise the data never reaches the vm_object and
+-	 * every file read returns zeroes.
+-	 */
+-	{
+-		extern unsigned long long kvtophys(unsigned long long);
+-		unsigned long long vpa = kvtophys((unsigned long long)(uintptr_t)vaddr);
+-
+-		printf("SWEET UPLMAP: vaddr %#llx vpa %#llx blkno %llu count %u\n",
+-		    (unsigned long long)(uintptr_t)vaddr, vpa,
+-		    (unsigned long long)buf_blkno(bp), (unsigned)buf_count(bp));
+-	}
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	for (uint32_t done = 0; done < count;) {
+@@ -750,6 +734,20 @@
+ 			 * back, so the next boot tells a wrong bmap from a wrong read.
+ 			 */
+ 			if (count >= 4096) {
++				/* SWEET (R46): print the physical page the driver is
++				 * filling, right next to the data itself.  The UPL's own
++				 * page list must name this same page, otherwise
++				 * upl_commit_range() hands the vm_object a different page
++				 * and every read stays zero. */
++				{
++					extern unsigned long long kvtophys(unsigned long long);
++
++					printf("SWEET UPLMAP: vaddr %#llx vpa %#llx blkno %llu count %u\n",
++					    (unsigned long long)(uintptr_t)(vaddr + done),
++					    kvtophys((unsigned long long)(uintptr_t)(vaddr + done)),
++					    (unsigned long long)buf_blkno(bp),
++					    (unsigned)buf_count(bp));
++				}
+ 				printf("SWEET UFS: RD blkno %llu count %u sec %u off 0x%llx "
+ 				    "lba %llu skip %u want %u blocks %u err %d first %08x "
+ 				    "flags 0x%x\n",
+--- a/osfmk/vm/vm_pageout.c
++++ b/osfmk/vm/vm_pageout.c
+@@ -7839,6 +7839,33 @@
+ 				}
+ 			}
+ 		}
++		/* SWEET (R46): the commit only hands the vm_object the page the
++		 * UPL names in its page list.  Print both physical page numbers:
++		 * if they differ, the driver filled a page that the vm_object
++		 * does not own, and every file read keeps returning zeroes. */
++		if (size >= 16384) {
++			ppnum_t m_pn = 0;
++			ppnum_t u_pn = 0;
++			int     lite = -1;
++
++			if (m != VM_PAGE_NULL) {
++				m_pn = VM_PAGE_GET_PHYS_PAGE(m);
++			}
++			if (page_list) {
++				u_pn = page_list[entry].phys_addr;
++			}
++			if (upl->lite_list) {
++				lite = (int)bitmap_test(upl->lite_list,
++				    (unsigned int)(target_offset / PAGE_SIZE));
++			}
++			printf("SWEET COMMITLITE: obj %#llx pg_num %u lite %d m %p "
++			    "m_pn %#x u_pn %#x present %d dirty %d\n",
++			    (unsigned long long)obj_offset,
++			    (unsigned int)(target_offset / PAGE_SIZE), lite,
++			    (void *)m, (unsigned)m_pn, (unsigned)u_pn,
++			    (int)(page_list ? upl_page_present(page_list, entry) : 0),
++			    (int)(page_list ? upl_dirty_page(page_list, entry) : 0));
++		}
+ 		if (m == VM_PAGE_NULL) {
+ 			goto commit_next_page;
+ 		}
