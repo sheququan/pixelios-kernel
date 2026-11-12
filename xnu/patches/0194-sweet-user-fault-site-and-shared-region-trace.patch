@@ -1,0 +1,44 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1511,6 +1511,23 @@
+ 		exc |= EXC_PTRAUTH_BIT;
+ 	}
+ #endif /* __has_feature(ptrauth_calls) */
++	/*
++	 * SWEET (R47): the process is about to die from a fault that vm_fault()
++	 * could not resolve.  On this port there is no core-dump path that would
++	 * survive to be read afterwards, so the faulting instruction and address
++	 * are lost exactly when they matter most.  panic() runs on its own
++	 * console path (legal in exception context, unlike printf) and stops the
++	 * machine on the spot, so the fault site is visible on screen.
++	 */
++	{
++		uint32_t sweet_instr = 0;
++
++		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
++		    sizeof(sweet_instr));
++		panic("SWEET UFAULT: pc %#llx instr %08x esr %#x code %#llx far %#llx",
++		    (unsigned long long)get_saved_state_pc(state), sweet_instr, esr,
++		    (unsigned long long)codes[0], (unsigned long long)fault_addr);
++	}
+ 	exception_triage(exc, codes, numcodes);
+ 	__builtin_unreachable();
+ }
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2769,6 +2769,15 @@
+ 	}
+ 
+ 	/*
++	 * SWEET (R47): the shared cache mapping is the one thing dyld cannot
++	 * live without, and its failure is otherwise silent unless the tracing
++	 * macro is compiled in.  Report the outcome here so "mapping never
++	 * happened" and "mapping succeeded, then something else broke" can be
++	 * told apart from the screen.
++	 */
++	printf("SWEET SRMAP: files %u map_kr %#x error %d\n", files_count, kr, error);
++
++	/*
+ 	 * Mark that this process is now using split libraries.
+ 	 */
+ 	if (error == 0 && (p->p_flag & P_NOSHLIB)) {
