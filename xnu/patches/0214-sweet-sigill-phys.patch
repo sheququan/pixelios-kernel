@@ -1,0 +1,123 @@
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -4278,6 +4278,33 @@
+ 	vm_map_address_t end,
+ 	int options)
+ {
++	/* SWEET (R74): report removals covering exec-fill pages.  R73 showed
++	 * the faulting page WAS filled (SIGWR filled pn ... w0 real) and no
++	 * pmap_enter rewired it (no WIRE) when the CPU executed zeros -- the
++	 * remaining suspects are a removal + refault wiring, or content loss.
++	 * UNWIRE makes removals visible; capped, range-guarded, thread ctx. */
++	{
++		extern uint64_t sweet_wr_va[];
++		extern int sweet_wr_n;
++		extern uint64_t sweet_wr_min, sweet_wr_max;
++		static int sweet_unwire_prints = 0;
++
++		if (sweet_wr_n > 0 && start < 0x0000800000000000ULL &&
++		    end > sweet_wr_min && start <= sweet_wr_max) {
++			int wi;
++
++			for (wi = 0; wi < sweet_wr_n && wi < 128; wi++) {
++				if (sweet_wr_va[wi] >= start &&
++				    sweet_wr_va[wi] < end &&
++				    sweet_unwire_prints < 64) {
++					sweet_unwire_prints++;
++					printf("SWEET UNWIRE: va %#llx pmap %p\n",
++					    (unsigned long long)sweet_wr_va[wi],
++					    (void *)pmap);
++				}
++			}
++		}
++	}
+ 	vm_map_address_t va;
+ 
+ 	if (pmap == PMAP_NULL) {
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -771,7 +771,8 @@
+ 		if (is_user) {
+ 			uint32_t instr = 0;
+ 			char sweet_zpage[192];
+-			char sweet_wrline[128];
++			char sweet_wrline[192];
++			char sweet_sigpa[192];
+ 			extern void sweet_tr_after_format(char *, unsigned long);
+ 			/* SWEET (R74): say whether the page the CPU died on was
+ 			 * ever filled with real data (and with what), straight
+@@ -780,12 +781,22 @@
+ 			extern uint32_t sweet_wr_pn[];
+ 			extern uint32_t sweet_wr_w0[];
+ 			extern int sweet_wr_n;
++			/* SWEET (R74): and settle WHERE the zero page is: the
++			 * pa the pmap maps pc to (AT translation, this thread's
++			 * TTBR0 is still the user pmap), the words physically
++			 * stored there, and the words physically stored in the
++			 * page the fill wrote.  Physical reads are guarded to
++			 * 1 TiB (F113: ml_phys_read can abort outside RAM). */
++			extern pmap_paddr_t kvtophys(vm_offset_t);
++			extern unsigned int ml_phys_read_word_64(uint64_t);
+ 
+ 			COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
++			sweet_sigpa[0] = '\0';
+ 			{
+ 				uint64_t sweet_pg = get_saved_state_pc(state) &
+ 				    ~(uint64_t)(PAGE_SIZE - 1);
+ 				int sweet_wi, sweet_found = -1;
++				uint64_t sweet_pa, sweet_fpa = 0;
+ 
+ 				for (sweet_wi = 0;
+ 				    sweet_wi < sweet_wr_n && sweet_wi < 128;
+@@ -795,11 +806,34 @@
+ 						break;
+ 					}
+ 				}
++				sweet_pa = kvtophys((vm_offset_t)get_saved_state_pc(state)) &
++				    ~(uint64_t)(PAGE_SIZE - 1);
++				if (sweet_pa != 0 && sweet_pa < 0x10000000000ULL) {
++					unsigned int pw0 = ml_phys_read_word_64(sweet_pa);
++					unsigned int pw1 = ml_phys_read_word_64(sweet_pa + 4);
++
++					snprintf(sweet_sigpa, sizeof(sweet_sigpa),
++					    "SWEET SIGPA: pc maps to pa %#llx phys %08x %08x\n",
++					    sweet_pa, pw0, pw1);
++				}
+ 				if (sweet_found >= 0) {
+-					snprintf(sweet_wrline, sizeof(sweet_wrline),
+-					    "SWEET SIGWR: pc-page %#llx filled pn 0x%x w0 %08x\n",
+-					    sweet_pg, sweet_wr_pn[sweet_found],
+-					    sweet_wr_w0[sweet_found]);
++					sweet_fpa = (uint64_t)sweet_wr_pn[sweet_found] <<
++					    PAGE_SHIFT;
++					if (sweet_fpa != 0 && sweet_fpa < 0x10000000000ULL) {
++						unsigned int fw0 = ml_phys_read_word_64(sweet_fpa);
++						unsigned int fw1 = ml_phys_read_word_64(sweet_fpa + 4);
++
++						snprintf(sweet_wrline, sizeof(sweet_wrline),
++						    "SWEET SIGWR: pc-page %#llx filled pn 0x%x w0 %08x fillpage pa %#llx phys %08x %08x\n",
++						    sweet_pg, sweet_wr_pn[sweet_found],
++						    sweet_wr_w0[sweet_found], sweet_fpa,
++						    fw0, fw1);
++					} else {
++						snprintf(sweet_wrline, sizeof(sweet_wrline),
++						    "SWEET SIGWR: pc-page %#llx filled pn 0x%x w0 %08x\n",
++						    sweet_pg, sweet_wr_pn[sweet_found],
++						    sweet_wr_w0[sweet_found]);
++					}
+ 				} else {
+ 					snprintf(sweet_wrline, sizeof(sweet_wrline),
+ 					    "SWEET SIGWR: pc-page %#llx NOT in fill table (n %d)\n",
+@@ -811,10 +845,10 @@
+ 			 * it after the forced fill.  Formatted, not printed: see
+ 			 * F86 for why printf() is not usable here. */
+ 			sweet_tr_after_format(sweet_zpage, sizeof(sweet_zpage));
+-			panic("SWEET SIGILL: pc %#llx instr %08x esr %#x ec %u far %#llx\n%s%s",
++			panic("SWEET SIGILL: pc %#llx instr %08x esr %#x ec %u far %#llx\n%s%s%s",
+ 			    (unsigned long long)get_saved_state_pc(state), instr, esr,
+ 			    (unsigned)class, (unsigned long long)far,
+-			    sweet_wrline, sweet_zpage);
++			    sweet_wrline, sweet_sigpa, sweet_zpage);
+ 		}
+ 
+ 		handle_uncategorized(&context->ss);
