@@ -1,0 +1,68 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7924,6 +7924,65 @@
+ 						sweet_wr_record((va + pos) &
+ 						    ~(uint64_t)(PAGE_SIZE - 1), w32[0]);
+ 					}
++					/* SWEET (R73): F133 says the page a later
++					 * vm_fault installs at this VA can be a
++					 * DIFFERENT, zero-filled resident page
++					 * (F114: the broken UPL path commits zero
++					 * pages into the object's shadow chain).
++					 * Walk the map entry's object chain and
++					 * write the real data into EVERY resident
++					 * page covering this offset, so whichever
++					 * page a takeover installs has content. */
++					{
++						extern vm_map_address_t phystokv(pmap_paddr_t);
++						vm_map_entry_t  ment = NULL;
++						vm_object_t     mobj;
++						vm_object_offset_t moff;
++
++						if (vm_map_lookup_entry(
++							    current_map(),
++							    (vm_map_address_t)(va + pos),
++							    &ment) && ment != NULL &&
++						    !ment->is_sub_map) {
++							mobj = VME_OBJECT(ment);
++							moff = VME_OFFSET(ment) +
++							    (vm_object_offset_t)(off + pos);
++							while (mobj != VM_OBJECT_NULL) {
++								vm_page_t m;
++								vm_object_t sh;
++								vm_object_offset_t so;
++
++								vm_object_lock(mobj);
++								m = vm_page_lookup(mobj, moff);
++								if (m != VM_PAGE_NULL) {
++									vm_map_address_t kva =
++									    phystokv(ptoa(
++									    VM_PAGE_GET_PHYS_PAGE(m)));
++									vm_size_t cl;
++
++									memcpy((void *)(uintptr_t)kva,
++									    sweet_page, (size_t)n);
++									for (cl = 0; cl < (vm_size_t)n;
++									    cl += 64) {
++										__asm__ volatile("dc civac, %0" :: "r"(kva + cl) : "memory");
++									}
++									__asm__ volatile("dsb sy" ::: "memory");
++									m->vmp_dirty = TRUE;
++									printf("SWEET OBJFILL: va %#llx obj %p off %#llx pa %#llx\n",
++									    (unsigned long long)(va + pos),
++									    (void *)mobj,
++									    (unsigned long long)moff,
++									    (unsigned long long)ptoa(
++									    VM_PAGE_GET_PHYS_PAGE(m)));
++								}
++								sh = mobj->shadow;
++								so = mobj->vo_shadow_offset;
++								vm_object_unlock(mobj);
++								moff += (vm_object_offset_t)so;
++								mobj = sh;
++							}
++						}
++					}
+ 					filled++;
+ 					pos += n;
+ 				}
