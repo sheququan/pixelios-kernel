@@ -1,0 +1,29 @@
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -163,6 +163,26 @@
+ 		sweet_wr_max = pg;
+ 	}
+ 	sweet_wr_n++;
++	/* SWEET (R75): THE FIX for F137.  copyout() wrote this page through
++	 * the USER VA, so the real bytes live in D-cache dirty lines -- R43
++	 * proved dc ops on user VAs abort (access flag), so they were never
++	 * cleaned and the I-fetch read DRAM zeros (R74 SIGPA: pc maps to the
++	 * filled pa, the alias read returns the fill words, the fetch still
++	 * executed UDF).  Clean through the PHYSMAP alias -- a KERNEL VA,
++	 * which R43 proved is safe -- so the data reaches the PoU before the
++	 * fill's final ic ialluis + tlbi vmalle1is. */
++	{
++		extern uint64_t phystokv(uint64_t);
++		uint64_t kva = phystokv((uint64_t)pn << PAGE_SHIFT);
++		uint64_t cl;
++
++		if (kva != 0 && (kva >> 60) != 0) {
++			for (cl = 0; cl < (uint64_t)PAGE_SIZE; cl += 64) {
++				__asm__ volatile("dc cvac, %0" :: "r"(kva + cl) : "memory");
++			}
++			__asm__ volatile("dsb sy" ::: "memory");
++		}
++	}
+ }
+ 
+ void
