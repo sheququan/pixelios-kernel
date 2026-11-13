@@ -1,0 +1,75 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7981,6 +7981,72 @@
+ 						}
+ 					}
+ 					filled++;
++					/* SWEET (R79): F139 said the disk/BLOCKMAP
++					 * path is fine (dyld@0x10000 page = w0
++					 * 9114e108, pc offset 0x3c00 is REAL code
++					 * in the file), yet DRAM shows zeros at the
++					 * pc while the page base reads real.  Find
++					 * WHERE the bytes go missing, per 4 KiB
++					 * sub-chunk, right here:
++					 *   dram==buf && user==buf  -> all good
++					 *   dram==0   && user==buf  -> cache-only
++					 *      dirty line (clean ineffective)
++					 *   dram==0   && user==0    -> copyout never
++					 *      wrote it (fault at the 4 KiB line)
++					 * The alias read is preceded by dc civac
++					 * (clean+invalidate by KERNEL VA -- R43
++					 * proved user-VA dc ops abort), so the
++					 * read sees true DRAM AND the data is
++					 * preserved; this doubles as a whole-page
++					 * forced clean.  Print the first 8 pages
++					 * always, then mismatches only. */
++					{
++						extern uint64_t phystokv(uint64_t);
++						extern uint64_t kvtophys(vm_offset_t);
++						static int sweet_vb_seen = 0;
++						uint64_t vpa = kvtophys((vm_offset_t)(va + pos));
++
++						if (vpa != 0 && (vpa >> 60) != 0) {
++							uint64_t vkva = phystokv(vpa);
++							uint32_t *vw = (uint32_t *)(void *)sweet_page;
++							int vb2;
++
++							for (vb2 = 0; vb2 < 4; vb2++) {
++								uint64_t off2 = vkva +
++								    (uint64_t)vb2 * (PAGE_SIZE / 4);
++								uint32_t bw0 = 0, bw1 = 0, cl3;
++								uint32_t gw[2] = { 0, 0 };
++								int mm;
++
++								for (cl3 = 0; cl3 < (PAGE_SIZE / 4);
++								    cl3 += 64) {
++									__asm__ volatile("dc civac, %0" ::
++									    "r"(off2 + cl3) : "memory");
++								}
++								__asm__ volatile("dsb sy" ::: "memory");
++								memcpy(&bw0, (const void *)(uintptr_t)off2, 4);
++								memcpy(&bw1, (const void *)(uintptr_t)(off2 + 4), 4);
++								(void)copyin((user_addr_t)(va + pos +
++								    (uint64_t)vb2 * (PAGE_SIZE / 4)),
++								    (char *)gw, sizeof(gw));
++								mm = (bw0 != vw[vb2 * 2] ||
++								    bw1 != vw[vb2 * 2 + 1] ||
++								    gw[0] != vw[vb2 * 2] ||
++								    gw[1] != vw[vb2 * 2 + 1]);
++								if (mm || sweet_vb_seen < 8) {
++									printf("SWEET VB: va %#llx foff %#llx bi %d buf %08x %08x dram %08x %08x user %08x %08x %s\n",
++									    (unsigned long long)(va + pos),
++									    (unsigned long long)(off + pos),
++									    vb2, vw[vb2 * 2], vw[vb2 * 2 + 1],
++									    bw0, bw1, gw[0], gw[1],
++									    mm ? "MISMATCH" : "ok");
++									if (mm) {
++										sweet_vb_seen++;
++									}
++								}
++							}
++						}
++					}
+ 					pos += n;
+ 				}
+ 				/* keep the iocount: the pmap_enter pass reuses sweet_seg_vp[] */
