@@ -1,0 +1,26 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7879,10 +7879,20 @@
+ 								    (sweet_page + bi * (PAGE_SIZE / 4));
+ 
+ 								if (w[0] == 0 && w[1] == 0) {
+-									printf("SWEET ZCHUNK: off %#llx pos %#llx bi %d blk %#llx\n",
+-									    (unsigned long long)off,
++									/* SWEET (R78): print the exact file
++									 * offset and the blockmap run so the
++									 * offline catalog extents can be
++									 * compared against what BLOCKMAP
++									 * returned (F139: the failing reads
++									 * are deterministic because the disk
++									 * really is zero AT THE BPN -- the
++									 * mapping, not the device, is wrong). */
++									printf("SWEET ZCHUNK: foff %#llx pos %#llx bi %d blk %#llx run %zu\n",
++									    (unsigned long long)(off + pos +
++									        bi * (PAGE_SIZE / 4)),
+ 									    (unsigned long long)pos, bi,
+-									    (unsigned long long)sub_bpn);
++									    (unsigned long long)sub_bpn,
++									    sub_run);
+ 								}
+ 							}
+ 						}
