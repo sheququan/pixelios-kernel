@@ -16,8 +16,8 @@
 +					 * through the physmap alias (kernel VA). */
 +					{
 +						extern uint64_t phystokv(uint64_t);
-+						extern uint64_t kvtophys(uint64_t);
-+						uint64_t cpa = kvtophys((uint64_t)(va + pos));
++						extern uint64_t kvtophys(vm_offset_t);
++						uint64_t cpa = kvtophys((vm_offset_t)(va + pos));
 +						uint64_t cl2, span = (uint64_t)n + (cpa & 63);
 +
 +						cpa &= ~(uint64_t)63;
