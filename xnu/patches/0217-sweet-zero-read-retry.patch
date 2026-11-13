@@ -1,0 +1,71 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -832,7 +832,7 @@
+ {
+ 	uint32_t units[2], want;
+ 	const char *zeroptr;
+-	int ui, i, error = EINVAL, hit = -1;
++	int ui, i, error = EINVAL, hit = -1, zcache = 0;
+ 
+ 	if (dst == NULL || bytes == 0 || blkno < 0 || !su.nblocks) {
+ 		return EINVAL;
+@@ -877,6 +877,19 @@
+ 				continue;
+ 			}
+ 			memcpy(dst, src, want);
++			/* SWEET (R77): R76's SIGPA exact-pa probe proved the
++			 * faulting page holds REAL ZEROS in DRAM at the fetch
++			 * address (F138) -- the fill wrote what it read, and
++			 * some reads deliver all-zero 4 KiB blocks for blocks
++			 * whose on-disk content is real (ZCHUNK at 0x37000 /
++			 * 0x57000 vs dyld.bin).  A cache entry that serves
++			 * zeros for a mid-window chunk is one such source;
++			 * verify it against the device before trusting it. */
++			if ((((const uint32_t *)dst)[0] | ((const uint32_t *)dst)[1]) == 0 &&
++			    want >= PAGE_SIZE / 4) {
++				zcache = 1;
++				break;
++			}
+ 			/* SWEET (R74): healthy hits are the norm now; keep a
+ 			 * slow heartbeat instead of one line per 4 KiB. */
+ 			{
+@@ -891,6 +904,12 @@
+ 			}
+ 			return 0;
+ 		}
++		if (zcache) {
++			printf("SWEET ZCACHE: blk %lld entry %d delivers zeros -- verifying direct\n",
++			    (long long)blkno, i);
++			zcache = 0;
++			continue;
++		}
+ 	}
+ 	/* SWEET (R74): the miss line per 4 KiB chunk flooded the console
+ 	 * during the fill (4 chunks x 91 pages); heartbeat only. */
+@@ -932,6 +951,26 @@
+ 		/* SWEET (R74): only zero or failed direct reads matter;
+ 		 * healthy bytes were proven in R44/F112. */
+ 		if (error || (w[0] | w[1] | w[2] | w[3]) == 0) {
++			/* SWEET (R77): F138 -- the UFS read path intermittently
++			 * returns all-zero 4 KiB blocks whose on-disk content is
++			 * real (ZCHUNK at dyld 0x37000/0x57000; SIGILL executes
++			 * the zeros the fill wrote).  Prime suspect: completion
++			 * reported before the data DMA lands.  Re-issue the same
++			 * READ(10) immediately; if the data appears, use it. */
++			uint32_t w2[4] = { 0, 0, 0, 0 };
++			int rerr = ufs_read_blocks(su.first_block + lba, blocks);
++
++			if (!rerr) {
++				memcpy(w2, src, sizeof(w2));
++			}
++			printf("SWEET ZRETRY: blk %lld unit %u lba %llu retry err %d w %08x -> %08x %08x %08x %08x\n",
++			    (long long)blkno, units[ui], (unsigned long long)lba,
++			    rerr, w[0], w2[0], w2[1], w2[2], w2[3]);
++			if (!rerr && (w2[0] | w2[1] | w2[2] | w2[3]) != 0) {
++				memcpy(dst, src, want);
++				hit = ui;
++				break;
++			}
+ 			printf("SWEET UFSREAD: unit %u lba %llu skip %u w %08x %08x %08x %08x\n",
+ 			    units[ui], (unsigned long long)lba, skip,
+ 			    w[0], w[1], w[2], w[3]);
