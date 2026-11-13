@@ -1,0 +1,175 @@
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -116,6 +116,80 @@
+ struct vnode   *sweet_seg_vp[SWEET_MAX_SEGS];
+ int             sweet_seg_count = 0;
+ 
++/* SWEET (R72): every 16 KiB page the forced exec fill wrote, with the
++ * physical page copyout() went through and the first word written.
++ * pmap_enter() in osfmk/arm/pmap/pmap.c watches this table (range-guarded)
++ * and prints whenever one of these VAs is re-entered with a DIFFERENT
++ * physical page.  F133: the entry page reads real instructions at fill time
++ * and zero at SIGILL, yet SWEET ZPAGE counted NO page-in in between -- the
++ * only mechanism left is an object-resident zero page (F114: upl_commit
++ * creates resident zero pages) silently replacing the wired page through a
++ * later vm_fault, which never needs a cluster_pagein().  This table makes
++ * that takeover visible live, without depending on panic capture. */
++#define SWEET_WR_MAX 128
++uint64_t        sweet_wr_va[SWEET_WR_MAX];
++uint32_t        sweet_wr_pn[SWEET_WR_MAX];
++uint32_t        sweet_wr_w0[SWEET_WR_MAX];
++int             sweet_wr_n = 0;
++uint64_t        sweet_wr_min = ~0ULL;
++uint64_t        sweet_wr_max = 0;
++
++void
++sweet_wr_record(uint64_t pg, uint32_t w0)
++{
++	extern uint64_t kvtophys(vm_offset_t);
++	int     i;
++	uint32_t pn;
++
++	if (pg == 0 || (pg & (PAGE_SIZE - 1)) != 0) {
++		return;
++	}
++	for (i = 0; i < sweet_wr_n && i < SWEET_WR_MAX; i++) {
++		if (sweet_wr_va[i] == pg) {
++			return;
++		}
++	}
++	if (sweet_wr_n >= SWEET_WR_MAX) {
++		return;
++	}
++	pn = (uint32_t)(kvtophys((vm_offset_t)pg) >> PAGE_SHIFT);
++	sweet_wr_va[sweet_wr_n] = pg;
++	sweet_wr_pn[sweet_wr_n] = pn;
++	sweet_wr_w0[sweet_wr_n] = w0;
++	if (pg < sweet_wr_min) {
++		sweet_wr_min = pg;
++	}
++	if (pg > sweet_wr_max) {
++		sweet_wr_max = pg;
++	}
++	sweet_wr_n++;
++}
++
++void
++sweet_wr_reset(void)
++{
++	sweet_wr_n = 0;
++	sweet_wr_min = ~0ULL;
++	sweet_wr_max = 0;
++}
++
++/* SWEET (R72): the entry page is re-read into a dedicated kernel buffer and
++ * wired manually with pmap_enter(); its final physical page differs from the
++ * one copyout() wrote.  Update the record so pmap_enter() only shouts about
++ * LATER takeovers, not about this expected re-wiring. */
++void
++sweet_wr_update_pn(uint64_t pg, uint32_t pn)
++{
++	int     i;
++
++	for (i = 0; i < sweet_wr_n && i < SWEET_WR_MAX; i++) {
++		if (sweet_wr_va[i] == pg) {
++			sweet_wr_pn[i] = pn;
++			return;
++		}
++	}
++}
++
+ /* An empty load_result_t */
+ static const load_result_t load_result_null = {
+ 	.mach_header = MACH_VM_MIN_ADDRESS,
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7807,10 +7807,14 @@
+ 			extern int sweet_seg_count;
+ 			extern uint64_t sweet_fill_dbg[8];
+ 			extern off_t ubc_getsize(struct vnode *);
++			/* SWEET (R72): per-page recorder consumed by pmap_enter(). */
++			extern void sweet_wr_record(uint64_t, uint32_t);
++			extern void sweet_wr_reset(void);
+ 			static char sweet_page[PAGE_SIZE];
+ 			uint64_t written_va[128];
+ 			int si, filled = 0, rd_bad = 0, co_bad = 0, wn = 0;
+ 
++			sweet_wr_reset();
+ 			for (si = 0; si < sweet_seg_count && si < 32; si++) {
+ 				struct vnode *svp = sweet_seg_vp[si];
+ 				uint64_t va = sweet_seg_va[si];
+@@ -7911,6 +7915,15 @@
+ 					if (wn < 128) {
+ 						written_va[wn++] = va + pos;
+ 					}
++					/* SWEET (R72): remember this page (VA, physical page
++					 * copyout wrote through, first word written) so
++					 * pmap_enter() can name the page that replaces it. */
++					{
++						uint32_t *w32 = (uint32_t *)(void *)sweet_page;
++
++						sweet_wr_record((va + pos) &
++						    ~(uint64_t)(PAGE_SIZE - 1), w32[0]);
++					}
+ 					filled++;
+ 					pos += n;
+ 				}
+@@ -8177,6 +8190,14 @@
+ 				    (unsigned)pmap_find_phys(tgt_pmap, (addr64_t)page));
+ 			}
+ 			pp_after = pmap_find_phys(tgt_pmap, (addr64_t)page);
++			/* SWEET (R72): the manual wiring replaced the copyout
++			 * page -- record the final pn so pmap_enter() does not
++			 * flag this expected step as a takeover. */
++			{
++				extern void sweet_wr_update_pn(uint64_t, uint32_t);
++
++				sweet_wr_update_pn((uint64_t)page, (uint32_t)pn);
++			}
+ 			/* R42: R40 proved cur_pp == tgt_pp == pn and R41 proved that
+ 			 * pmap_switch(tgt_pmap) still leaves copyin() reading zeroes.
+ 			 * Two causes remain: a stale TLB entry tagged with the active
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -5575,6 +5575,41 @@
+ 	unsigned int flags,
+ 	boolean_t wired)
+ {
++	/* SWEET (R72): if a VA the exec fill wrote with real data is re-entered
++	 * with a DIFFERENT physical page, say so.  F133: the entry page held
++	 * real instructions at fill time and zero at SIGILL with no page-in in
++	 * between; an object-resident zero page taking over through vm_fault
++	 * is the remaining suspect and this prints it live, in thread context,
++	 * without depending on panic capture.  The range guard keeps the hot
++	 * path cheap (kernel VAs fail the first compare). */
++	{
++		extern uint64_t sweet_wr_va[];
++		extern uint32_t sweet_wr_pn[];
++		extern uint32_t sweet_wr_w0[];
++		extern int sweet_wr_n;
++		extern uint64_t sweet_wr_min, sweet_wr_max;
++		static int sweet_wire_prints = 0;
++
++		if (sweet_wr_n > 0 && v < 0x0000800000000000ULL &&
++		    v >= sweet_wr_min && v <= sweet_wr_max) {
++			int wi;
++
++			for (wi = 0; wi < sweet_wr_n && wi < 128; wi++) {
++				if (sweet_wr_va[wi] == v &&
++				    sweet_wr_pn[wi] != pn) {
++					if (sweet_wire_prints < 64) {
++						sweet_wire_prints++;
++						printf("SWEET WIRE: va %#llx pn 0x%x was 0x%x pmap %p wired %d w0 %08x\n",
++						    (unsigned long long)v, pn,
++						    sweet_wr_pn[wi],
++						    (void *)pmap, wired,
++						    sweet_wr_w0[wi]);
++					}
++					break;
++				}
++			}
++		}
++	}
+ 	return pmap_enter_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired);
+ }
+ 
