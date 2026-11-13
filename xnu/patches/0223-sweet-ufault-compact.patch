@@ -1,0 +1,94 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1617,13 +1617,9 @@
+ 	 */
+ 	{
+ 		uint32_t sweet_instr = 0;
+-		char sweet_trbuf[640];
+ 		char sweet_arg[48];
+ 		uint64_t sweet_tbl[4] = { 0, 0, 0, 0 };
+-		uint64_t sweet_dump[8] = { 0 };
+ 		uint64_t sweet_idx = 0;
+-		extern uint64_t sweet_fill_dbg[8];
+-		extern void sweet_tr_format(char *, unsigned long);
+ 
+ 		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
+ 		    sizeof(sweet_instr));
+@@ -1647,26 +1643,6 @@
+ 		sweet_idx = saved_state64(state)->x[23];
+ 		sweet_tbl[0] = saved_state64(state)->x[24];
+ 		/*
+-		 * SWEET (R58): read the eight table entries at the base the loader
+-		 * used, but only after a range check -- R56 taught us that copyin()
+-		 * of an unchecked register-derived address aborts the kernel when it
+-		 * lands outside the user range (F126).  Everything below 2^47 is a
+-		 * user VA on this port.
+-		 */
+-		if (sweet_tbl[0] < 0x0000800000000000ULL) {
+-			uint64_t ent[8] = { 0 };
+-
+-			COPYIN(sweet_tbl[0], ent, sizeof(ent));
+-			sweet_dump[0] = ent[0];
+-			sweet_dump[1] = ent[1];
+-			sweet_dump[2] = ent[2];
+-			sweet_dump[3] = ent[3];
+-			sweet_dump[4] = ent[4];
+-			sweet_dump[5] = ent[5];
+-			sweet_dump[6] = ent[6];
+-			sweet_dump[7] = ent[7];
+-		}
+-		/*
+ 		 * SWEET (R82): the fault is pc=0 lr=0 -- a br/ret forwarded a
+ 		 * NULL pointer, so lr will never name the caller.  Dump the
+ 		 * remaining integer registers (x16/x17 are the usual indirect
+@@ -1701,26 +1677,22 @@
+ 				sweet_fp = fr[0];
+ 			}
+ 		}
+-		/* Formatted here (no console I/O) and printed by panic(), which
+-		 * is allowed in this context; see F86. */
+-		sweet_tr_format(sweet_trbuf, sizeof(sweet_trbuf));
++		/*
++		 * SWEET (R83): the framebuffer console truncates the panic
++		 * string after a few lines (R81/R82 both stopped mid-message,
++		 * right after SWEET ENT), so the highest-value lines must come
++		 * first: REGS and BT lead, TBL/ENT/FILL2 trail and may be cut.
++		 */
+ 		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx x0 %#llx x1 %#llx arg '%s'\n"
+-		    "SWEET TBL: tbl %#llx idx %#llx\n"
+-		    "SWEET ENT: %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n"
+ 		    "SWEET REGS: x16 %#llx x17 %#llx x19 %#llx x21 %#llx x22 %#llx x25 %#llx fp %#llx sp %#llx\n"
+ 		    "SWEET BT: f0 %#llx r0 %#llx f1 %#llx r1 %#llx f2 %#llx r2 %#llx f3 %#llx r3 %#llx f4 %#llx r4 %#llx f5 %#llx r5 %#llx\n"
+-		    "SWEET FILL2: segs %llu blk %llu rdb %llu cob %llu va %#llx len %#llx w %08x f %llu\n%s",
++		    "SWEET TBL: tbl %#llx idx %#llx",
+ 		    (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+ 		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
+ 		    (unsigned long long)saved_state64(state)->x[0],
+ 		    (unsigned long long)saved_state64(state)->x[1],
+ 		    sweet_arg,
+-		    (unsigned long long)sweet_tbl[0], (unsigned long long)sweet_idx,
+-		    (unsigned long long)sweet_dump[0], (unsigned long long)sweet_dump[1],
+-		    (unsigned long long)sweet_dump[2], (unsigned long long)sweet_dump[3],
+-		    (unsigned long long)sweet_dump[4], (unsigned long long)sweet_dump[5],
+-		    (unsigned long long)sweet_dump[6], (unsigned long long)sweet_dump[7],
+ 		    (unsigned long long)sweet_regs[0], (unsigned long long)sweet_regs[1],
+ 		    (unsigned long long)sweet_regs[2], (unsigned long long)sweet_regs[3],
+ 		    (unsigned long long)sweet_regs[4], (unsigned long long)sweet_regs[5],
+@@ -1731,15 +1703,7 @@
+ 		    (unsigned long long)sweet_bt[6], (unsigned long long)sweet_bt[7],
+ 		    (unsigned long long)sweet_bt[8], (unsigned long long)sweet_bt[9],
+ 		    (unsigned long long)sweet_bt[10], (unsigned long long)sweet_bt[11],
+-		    (unsigned long long)sweet_fill_dbg[0],
+-		    (unsigned long long)sweet_fill_dbg[1],
+-		    (unsigned long long)sweet_fill_dbg[2],
+-		    (unsigned long long)sweet_fill_dbg[3],
+-		    (unsigned long long)sweet_fill_dbg[4],
+-		    (unsigned long long)sweet_fill_dbg[5],
+-		    (unsigned int)sweet_fill_dbg[6],
+-		    (unsigned long long)sweet_fill_dbg[7],
+-		    sweet_trbuf);
++		    (unsigned long long)sweet_tbl[0], (unsigned long long)sweet_idx);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
+ 	__builtin_unreachable();
