@@ -1,0 +1,99 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7813,8 +7813,22 @@
+ 			static char sweet_page[PAGE_SIZE];
+ 			uint64_t written_va[128];
+ 			int si, filled = 0, rd_bad = 0, co_bad = 0, wn = 0;
++			/* SWEET (R81): one dedicated 16 KiB kernel page per
++			 * fill page -- the entry-page mechanism generalized
++			 * (see the wiring block below).  128 slots cover the
++			 * 91 fill blocks with slack; the raw array is aligned
++			 * up to PAGE_SIZE at first use (R32's alignment
++			 * lesson). */
++			static char sweet_fill_raw[129 * PAGE_SIZE];
++			static int sweet_fill_idx = 0;
++			pmap_t sweet_cur_pm, sweet_tgt_pm;
++			char *sweet_fb = (char *)(((uintptr_t)sweet_fill_raw +
++			    PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1));
+ 
++			sweet_cur_pm = get_task_pmap(current_task());
++			sweet_tgt_pm = get_task_pmap(proc_task(p));
+ 			sweet_wr_reset();
++			sweet_fill_idx = 0;
+ 			for (si = 0; si < sweet_seg_count && si < 32; si++) {
+ 				struct vnode *svp = sweet_seg_vp[si];
+ 				uint64_t va = sweet_seg_va[si];
+@@ -7988,6 +8002,73 @@
+ 							__asm__ volatile("dsb sy" ::: "memory");
+ 						}
+ 					}
++					/* SWEET (R81): generalize the entry-page
++					 * mechanism (R32/R40, TLBFIX-verified) to
++					 * every fill page.  The VB probe (R80)
++					 * proved copyout, the fault path and the
++					 * AT translation all disagree about which
++					 * physical page a fill VA maps -- the CPU
++					 * executes a page nobody wrote.  This is
++					 * the only path proven to deliver real
++					 * bytes: write the page into a dedicated
++					 * 16 KiB kernel page, clean it by
++					 * KERNEL-VA dc ops (R43: user-VA dc ops
++					 * abort; R42: clean before wiring), then
++					 * pmap_enter that page into BOTH pmaps.
++					 * The entry pass's final pmap_switch +
++					 * tlbi vmalle1is + ic ialluis then makes
++					 * every mapping visible before dyld runs. */
++					{
++						extern uint64_t kvtophys(vm_offset_t);
++						extern void sweet_wr_update_pn(uint64_t,
++						    uint32_t);
++						extern kern_return_t pmap_enter(pmap_t,
++						    vm_map_address_t, ppnum_t, vm_prot_t,
++						    vm_prot_t, unsigned int, boolean_t);
++
++						if (sweet_fill_idx < 128) {
++							char *fp81 = sweet_fb +
++							    (size_t)sweet_fill_idx * PAGE_SIZE;
++							uint64_t pa81;
++							ppnum_t pn81;
++							uintptr_t ca81;
++							kern_return_t pkr81;
++
++							memcpy(fp81, sweet_page, PAGE_SIZE);
++							for (ca81 = (uintptr_t)fp81;
++							    ca81 < (uintptr_t)fp81 + PAGE_SIZE;
++							    ca81 += 64) {
++								__asm__ volatile("dc civac, %0" ::
++								    "r"(ca81) : "memory");
++							}
++							__asm__ volatile("dsb sy" ::: "memory");
++							pa81 = kvtophys((vm_offset_t)fp81);
++							pn81 = (ppnum_t)(pa81 >> PAGE_SHIFT);
++							sweet_wr_update_pn((uint64_t)(va + pos),
++							    (uint32_t)pn81);
++							pkr81 = pmap_enter(sweet_tgt_pm,
++							    (vm_map_address_t)(va + pos), pn81,
++							    VM_PROT_READ | VM_PROT_WRITE |
++							    VM_PROT_EXECUTE,
++							    VM_PROT_READ, 0, TRUE);
++							if (pkr81 != KERN_SUCCESS) {
++								printf("SWEET WIRE81: tgt va %#llx pn 0x%x kr %d\n",
++								    (unsigned long long)(va + pos),
++								    (unsigned)pn81, (int)pkr81);
++							}
++							pkr81 = pmap_enter(sweet_cur_pm,
++							    (vm_map_address_t)(va + pos), pn81,
++							    VM_PROT_READ | VM_PROT_WRITE |
++							    VM_PROT_EXECUTE,
++							    VM_PROT_READ, 0, TRUE);
++							if (pkr81 != KERN_SUCCESS) {
++								printf("SWEET WIRE81: cur va %#llx pn 0x%x kr %d\n",
++								    (unsigned long long)(va + pos),
++								    (unsigned)pn81, (int)pkr81);
++							}
++							sweet_fill_idx++;
++						}
++					}
+ 					filled++;
+ 					/* SWEET (R79): F139 said the disk/BLOCKMAP
+ 					 * path is fine (dyld@0x10000 page = w0
