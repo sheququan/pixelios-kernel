@@ -1,0 +1,106 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8336,6 +8336,17 @@
+ 			if (seg >= 0) {
+ 				evp = sweet_seg_vp[seg];
+ 			}
++			/* SWEET (R84): one clean line, printed while the console
++			 * still scrolls normally (panic output gets cut after a
++			 * few lines -- F141).  main = the main image's mach header
++			 * VA, dyn = dyld's mach header VA, ent = the entry the
++			 * thread starts at (dyld's entry on this path), fp = the
++			 * file page backing the entry page. */
++			printf("SWEET MOD: main %#llx dyn %#llx ent %#llx fp %#llx\n",
++			    (unsigned long long)load_result->mach_header,
++			    (unsigned long long)load_result->dynlinker_mach_header,
++			    (unsigned long long)entry,
++			    (unsigned long long)fpage);
+ 			/* R38: HFS extents are 4 KiB and need not be contiguous
+ 			 * across one 16 KiB page.  R37 read 16 KiB from a single
+ 			 * bpn and got real code at offset 0 but zeroes at the
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1617,32 +1617,10 @@
+ 	 */
+ 	{
+ 		uint32_t sweet_instr = 0;
+-		char sweet_arg[48];
+-		uint64_t sweet_tbl[4] = { 0, 0, 0, 0 };
+-		uint64_t sweet_idx = 0;
+ 
+ 		COPYIN(get_saved_state_pc(state), (char *)&sweet_instr,
+ 		    sizeof(sweet_instr));
+ 		/*
+-		 * SWEET (R50): the last crash was a strcmp(x20, -1) inside dyld,
+-		 * so the interesting value is the string in x20 -- it names what
+-		 * dyld was looking for.  Read it with copyin (safe here) and NUL
+-		 * terminate unconditionally.
+-		 */
+-		sweet_arg[0] = 0;
+-		COPYIN(saved_state64(state)->x[20], sweet_arg, sizeof(sweet_arg) - 1);
+-		sweet_arg[sizeof(sweet_arg) - 1] = 0;
+-		/*
+-		 * SWEET (R57): only read the loop offset out of x23.  R56 tried to
+-		 * copyin the neighbouring table entries and turned the probe into a
+-		 * kernel data abort (F126): x24+x23 is attacker/loader-controlled
+-		 * and copyin() has no working recovery inside the exception path.
+-		 * The caller's table base and the index are enough -- the file's
+-		 * static contents are known offline.
+-		 */
+-		sweet_idx = saved_state64(state)->x[23];
+-		sweet_tbl[0] = saved_state64(state)->x[24];
+-		/*
+ 		 * SWEET (R82): the fault is pc=0 lr=0 -- a br/ret forwarded a
+ 		 * NULL pointer, so lr will never name the caller.  Dump the
+ 		 * remaining integer registers (x16/x17 are the usual indirect
+@@ -1683,17 +1661,30 @@
+ 		 * right after SWEET ENT), so the highest-value lines must come
+ 		 * first: REGS and BT lead, TBL/ENT/FILL2 trail and may be cut.
+ 		 */
+-		panic("SWEET UFAULT: pc %#llx lr %#llx instr %08x esr %#x code %#llx far %#llx x0 %#llx x1 %#llx arg '%s'\n"
+-		    "SWEET REGS: x16 %#llx x17 %#llx x19 %#llx x21 %#llx x22 %#llx x25 %#llx fp %#llx sp %#llx\n"
+-		    "SWEET BT: f0 %#llx r0 %#llx f1 %#llx r1 %#llx f2 %#llx r2 %#llx f3 %#llx r3 %#llx f4 %#llx r4 %#llx f5 %#llx r5 %#llx\n"
+-		    "SWEET TBL: tbl %#llx idx %#llx",
++		/*
++		 * SWEET (R84): the framebuffer console cuts the panic string
++		 * after roughly the first 8 lines (R81/R82/R83 all lost the
++		 * tail -- F141), and clips any token that reaches the right
++		 * screen edge.  Every line below is <= ~50 chars and carries
++		 * one or two values, with the highest-value values first.
++		 */
++		panic("SWEET UF1: pc %#llx lr %#llx\n"
++		    "SWEET UR: x0 %#llx x1 %#llx\n"
++		    "SWEET UR2: x2 %#llx x3 %#llx\n"
++		    "SWEET UR3: x19 %#llx x21 %#llx\n"
++		    "SWEET UR4: x22 %#llx x25 %#llx\n"
++		    "SWEET UR5: fp %#llx sp %#llx\n"
++		    "SWEET B0: f %#llx r %#llx\n"
++		    "SWEET B1: f %#llx r %#llx\n"
++		    "SWEET B2: f %#llx r %#llx\n"
++		    "SWEET B3: f %#llx r %#llx\n"
++		    "SWEET UF2: in %08x esr %#x c %#llx f %#llx",
+ 		    (unsigned long long)get_saved_state_pc(state),
+-		    (unsigned long long)get_saved_state_lr(state), sweet_instr, esr,
+-		    (unsigned long long)codes[0], (unsigned long long)fault_addr,
++		    (unsigned long long)get_saved_state_lr(state),
+ 		    (unsigned long long)saved_state64(state)->x[0],
+ 		    (unsigned long long)saved_state64(state)->x[1],
+-		    sweet_arg,
+-		    (unsigned long long)sweet_regs[0], (unsigned long long)sweet_regs[1],
++		    (unsigned long long)saved_state64(state)->x[2],
++		    (unsigned long long)saved_state64(state)->x[3],
+ 		    (unsigned long long)sweet_regs[2], (unsigned long long)sweet_regs[3],
+ 		    (unsigned long long)sweet_regs[4], (unsigned long long)sweet_regs[5],
+ 		    (unsigned long long)sweet_regs[6], (unsigned long long)sweet_regs[7],
+@@ -1701,9 +1692,8 @@
+ 		    (unsigned long long)sweet_bt[2], (unsigned long long)sweet_bt[3],
+ 		    (unsigned long long)sweet_bt[4], (unsigned long long)sweet_bt[5],
+ 		    (unsigned long long)sweet_bt[6], (unsigned long long)sweet_bt[7],
+-		    (unsigned long long)sweet_bt[8], (unsigned long long)sweet_bt[9],
+-		    (unsigned long long)sweet_bt[10], (unsigned long long)sweet_bt[11],
+-		    (unsigned long long)sweet_tbl[0], (unsigned long long)sweet_idx);
++		    sweet_instr, esr,
++		    (unsigned long long)codes[0], (unsigned long long)fault_addr);
+ 	}
+ 	exception_triage(exc, codes, numcodes);
+ 	__builtin_unreachable();
