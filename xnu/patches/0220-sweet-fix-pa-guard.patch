@@ -1,0 +1,28 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7971,7 +7971,15 @@
+ 						uint64_t cl2, span = (uint64_t)n + (cpa & 63);
+ 
+ 						cpa &= ~(uint64_t)63;
+-						if ((cpa >> 60) != 0) {
++						if (cpa != 0 && cpa < 0x10000000000ULL) {
++							/* SWEET (R80): the old guard
++							 * (cpa >> 60) != 0 tested a PHYSICAL
++							 * address (0x88xxxxxxx >> 60 == 0), so
++							 * the whole clean was DEAD CODE since
++							 * 0216 -- chunks 1..3 were never
++							 * cleaned, matching every SIGILL since
++							 * R76.  Correct guard: DRAM under 1 TB,
++							 * like the SIGPA probe. */
+ 							uint64_t kva = phystokv(cpa);
+ 
+ 							for (cl2 = 0; cl2 < span; cl2 += 64) {
+@@ -8006,7 +8014,7 @@
+ 						static int sweet_vb_seen = 0;
+ 						uint64_t vpa = kvtophys((vm_offset_t)(va + pos));
+ 
+-						if (vpa != 0 && (vpa >> 60) != 0) {
++						if (vpa != 0 && vpa < 0x10000000000ULL) {
+ 							uint64_t vkva = phystokv(vpa);
+ 							uint32_t *vw = (uint32_t *)(void *)sweet_page;
+ 							int vb2;
