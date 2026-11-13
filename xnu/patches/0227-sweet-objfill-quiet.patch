@@ -1,0 +1,32 @@
+--- a/osfmk/vm/vm_fault.c
++++ b/osfmk/vm/vm_fault.c
+@@ -8446,6 +8446,8 @@
+  * offset, so whichever page a takeover installs has content.
+  * Lives here because bsd TUs cannot see vm_map_entry_t / pmap_paddr_t.
+  */
++static int sweet_objfill_seen = 0;
++
+ void
+ sweet_objfill(uint64_t uva, uint64_t mapaddr, const void *buf, uint32_t n)
+ {
+@@ -8489,9 +8491,17 @@
+ 			}
+ 			__asm__ volatile("dsb sy" ::: "memory");
+ 			m->vmp_dirty = TRUE;
+-			printf("SWEET OBJFILL: va %#llx obj %p off %#llx pa %#llx\n",
+-			    uva, (void *)mobj, (unsigned long long)moff,
+-			    (unsigned long long)ptoa(VM_PAGE_GET_PHYS_PAGE(m)));
++			/* SWEET (R87): the rebase pass calls here ~2000 times
++			 * per boot (one per table entry); R86's boot flooded
++			 * the framebuffer console with one OBJFILL line each
++			 * and pushed the useful launchd output off the screen.
++			 * Keep only the first few prints as delivery evidence. */
++			if (sweet_objfill_seen < 4) {
++				sweet_objfill_seen++;
++				printf("SWEET OBJFILL: va %#llx obj %p off %#llx pa %#llx\n",
++				    uva, (void *)mobj, (unsigned long long)moff,
++				    (unsigned long long)ptoa(VM_PAGE_GET_PHYS_PAGE(m)));
++			}
+ 		}
+ 		sh = mobj->shadow;
+ 		so = mobj->vo_shadow_offset;
